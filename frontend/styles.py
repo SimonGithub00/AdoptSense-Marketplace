@@ -82,41 +82,6 @@ def inject_global_css():
         border: 1px solid {COLOR_PRIMARY};
     }}
 
-    /* ----- Tabs styled to live INSIDE the header card ----- */
-    /* This is the trick: we negative-margin the tab list up so it visually
-       attaches to the header bar, and give it a transparent background. */
-    .stTabs {{
-        background: transparent;
-    }}
-    .stTabs [data-baseweb="tab-list"] {{
-        gap: 32px;
-        border-bottom: 1px solid {COLOR_BORDER};
-        background: transparent;
-        padding: 0 24px;
-        margin-top: -8px;
-    }}
-    .stTabs [data-baseweb="tab"] {{
-        padding: 12px 4px;
-        font-size: 14px;
-        color: {COLOR_TEXT_MUTED};
-        background: transparent;
-        font-weight: 400;
-    }}
-    .stTabs [data-baseweb="tab"]:hover {{
-        color: {COLOR_PRIMARY};
-    }}
-    .stTabs [aria-selected="true"] {{
-        color: {COLOR_PRIMARY} !important;
-        font-weight: 500;
-    }}
-    .stTabs [data-baseweb="tab-highlight"] {{
-        background-color: {COLOR_PRIMARY} !important;
-        height: 2px !important;
-    }}
-    .stTabs [data-baseweb="tab-panel"] {{
-        padding-top: 24px;
-    }}
-
     /* Bordered containers */
     [data-testid="stVerticalBlockBorderWrapper"] {{
         border-radius: 12px;
@@ -130,17 +95,40 @@ def inject_global_css():
         border-radius: 8px !important;
     }}
 
-    /* Make the header bar sit closer to its tab list (no double-border feel) */
-    .as-header-bar {{
+    /* ----- Custom navbar (logo + nav + avatar in one row) ----- */
+    .as-navbar {{
         background: #FFFFFF;
-        padding: 14px 24px;
+        padding: 16px 28px;
         border: 1px solid {COLOR_BORDER};
-        border-radius: 12px 12px 0 0;
-        border-bottom: none;
+        border-radius: 12px;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-bottom: 0;
+        margin-bottom: 20px;
+        gap: 24px;
+    }}
+    .as-navbar-brand {{
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-shrink: 0;
+    }}
+    .as-navbar-user {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-shrink: 0;
+    }}
+
+    /* ----- Role switcher styled as a pill toggle ----- */
+    /* When rendered as st.segmented_control, this gives it a clean look. */
+    div[data-testid="stSegmentedControl"] button {{
+        font-size: 13px;
+        padding: 6px 16px;
+    }}
+    div[data-testid="stSegmentedControl"] button[aria-checked="true"] {{
+        background: {COLOR_PRIMARY} !important;
+        color: #FFFFFF !important;
     }}
     </style>
     """

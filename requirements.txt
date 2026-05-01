@@ -48,3 +48,4 @@ tqdm==4.67.3
 traitlets==5.14.3
 wcwidth==0.6.0
 xgboost==3.2.0
+streamlit-option-menu>=0.3.13

@@ -113,3 +113,11 @@ secrets.toml
 *.log
 *.tmp
 *.temp
+
+# ===============================
+# AdoptSense runtime artifacts
+# ===============================
+frontend/adoptsense.db
+frontend/assets/uploads/
+frontend/assets/studio/
+frontend/assets/seed_photos/

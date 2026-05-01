@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pandas as pd; df=pd.read_csv\\('c:/Users/simon/Desktop/AdoptSense-Pet-Adoption-Prediction/data/train/train.csv'\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.head\\(3\\)[['PetID','Type','Name','Age','Breed1','Fee','AdoptionSpeed']].to_string\\(\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(mkdir -p \"c:\\\\Users\\\\simon\\\\Desktop\\\\AdoptSense-Pet-Adoption-Prediction\\\\frontend\\\\assets\\\\uploads\")",
+      "Bash(mkdir -p \"c:\\\\Users\\\\simon\\\\Desktop\\\\AdoptSense-Pet-Adoption-Prediction\\\\frontend\\\\assets\\\\studio\")",
+      "Bash(mkdir -p \"c:\\\\Users\\\\simon\\\\Desktop\\\\AdoptSense-Pet-Adoption-Prediction\\\\frontend\\\\assets\\\\seed_photos\")",
+      "Bash(pip install *)",
+      "Bash(pip show *)"
+    ]
+  }
+}

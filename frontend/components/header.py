@@ -1,10 +1,10 @@
 """
 Top navbar — Logo + horizontal nav + user avatar / login, all in one row.
 
-Uses streamlit-option-menu for the horizontal nav so it actually looks like a
-real top navigation strip rather than Streamlit's default tab bar.
-
-Returns the selected nav option string so app.py can route accordingly.
+Fixes vs v1:
+- option_menu icons removed (the strange play-arrow glyphs)
+- nav-link white-space:nowrap so Shelter nav doesn't wrap into 2 lines
+- guest CTA buttons are compact and don't break across lines
 """
 import streamlit as st
 from streamlit_option_menu import option_menu
@@ -20,35 +20,64 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
     display_name = (user.get("shelter_name") or user["username"]) if user else None
     initial = (display_name[:1].upper() if display_name else "?")
 
-    brand_col, nav_col, user_col = st.columns([2.5, 4, 1.8], gap="medium")
+    # Wider nav column for shelter (more options); narrower for guest
+    if user and user.get("role") == "shelter_manager":
+        col_widths = [2.2, 5.5, 2.0]
+    elif user is None:
+        col_widths = [2.5, 4.0, 2.0]
+    else:
+        col_widths = [2.5, 4.5, 2.0]
 
-    # ── Brand (logo + wordmark + optional role badge) ──────────────────────
+    brand_col, nav_col, user_col = st.columns(col_widths, gap="medium")
+
+    # ── Brand: logo + wordmark + optional role badge ────────────────────────
     with brand_col:
-        role_badge = ""
+        # Render the wordmark + (optional) badge as a vertical stack so the
+        # badge can sit right under the wordmark instead of being clipped at
+        # the right edge of a narrow column.
         if role_label and user:
-            role_badge = (
-                f'<span style="font-size:11px;background:{COLOR_BG_SOFT};'
-                f'color:{COLOR_PRIMARY};padding:4px 10px;border-radius:4px;'
-                f'font-weight:500;margin-left:10px;letter-spacing:0.5px;">'
-                f'{role_label}</span>'
+            wordmark_block = (
+                f'<div style="display:flex;flex-direction:column;'
+                f'justify-content:center;line-height:1;">'
+                f'<span style="font-size:24px;font-weight:600;color:{COLOR_PRIMARY};'
+                f'letter-spacing:-0.4px;white-space:nowrap;">AdoptSense</span>'
+                f'<span style="font-size:10px;background:{COLOR_BG_SOFT};'
+                f'color:{COLOR_PRIMARY};padding:2px 8px;border-radius:3px;'
+                f'font-weight:600;letter-spacing:0.6px;margin-top:6px;'
+                f'align-self:flex-start;">{role_label}</span>'
+                f'</div>'
+            )
+        else:
+            wordmark_block = (
+                f'<span style="font-size:24px;font-weight:600;color:{COLOR_PRIMARY};'
+                f'letter-spacing:-0.4px;line-height:1;white-space:nowrap;">AdoptSense</span>'
             )
         brand_html = (
             f'<div style="display:flex;align-items:center;gap:12px;'
-            f'padding:14px 0 14px 8px;height:64px;">'
+            f'padding:10px 0 10px 8px;min-height:64px;overflow:visible;">'
             f'{logo_svg(40)}'
-            f'<span style="font-size:24px;font-weight:600;color:{COLOR_PRIMARY};'
-            f'letter-spacing:-0.4px;line-height:1;">AdoptSense</span>'
-            f'{role_badge}</div>'
+            f'{wordmark_block}'
+            f'</div>'
         )
         st.markdown(brand_html, unsafe_allow_html=True)
 
     # ── Horizontal nav menu ─────────────────────────────────────────────────
     with nav_col:
-        # Unique key per role to force a fresh menu after a role switch
-        menu_key = f"nav_menu_{(role_label or 'guest').lower().replace(' ', '_')}"
+        # Use empty icons list so option_menu doesn't add the default arrow icons.
+        # Length must match nav_options.
+        empty_icons = [""] * len(nav_options)
+        # IMPORTANT: include default_index in the key so option_menu re-initializes
+        # whenever the routed view changes. Without this, option_menu's internal
+        # widget state remembers the previous selection (e.g. "Watchlist") and
+        # returns it on a rerun where we wanted "Browse" — which then trips
+        # the sync block in app.py and bounces the user back to the old view.
+        # Tying the key to default_index forces a fresh widget per view.
+        role_part = (role_label or "guest").lower().replace(" ", "_")
+        menu_key = f"nav_menu_{role_part}_{default_index}"
         selected = option_menu(
             menu_title=None,
             options=nav_options,
+            icons=empty_icons,
             default_index=default_index,
             orientation="horizontal",
             key=menu_key,
@@ -59,16 +88,18 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
                     "border": "none",
                     "margin": "0",
                 },
+                "icon": {"display": "none"},  # hard-hide any leftover icon space
                 "nav-link": {
                     "font-size": "14px",
                     "font-weight": "400",
                     "color": COLOR_TEXT_MUTED,
                     "text-align": "center",
-                    "margin": "0 8px",
-                    "padding": "8px 4px",
+                    "margin": "0 6px",
+                    "padding": "8px 6px",
                     "background-color": "transparent",
                     "border-bottom": "2px solid transparent",
                     "border-radius": "0",
+                    "white-space": "nowrap",  # prevents 2-line wrapping
                     "--hover-color": "transparent",
                 },
                 "nav-link-selected": {
@@ -80,7 +111,7 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
             },
         )
 
-    # ── Right side: avatar + name (logged in) OR login/register (guest) ─────
+    # ── Right: avatar + name (logged in) OR login/register (guest) ──────────
     with user_col:
         if user:
             user_html = (
@@ -95,15 +126,12 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
                 f'</div>'
             )
             st.markdown(user_html, unsafe_allow_html=True)
-            # Logout button on its own row directly under the user info
             if st.button("Log out", key="navbar_logout", use_container_width=True):
                 auth.logout()
                 st.rerun()
         else:
-            # Two compact CTAs for login / register
-            st.markdown(
-                '<div style="height:14px;"></div>', unsafe_allow_html=True
-            )
+            # Compact CTA row — Register on the right (primary), Log In secondary
+            st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
             login_col, reg_col = st.columns(2, gap="small")
             with login_col:
                 if st.button("Log In", key="navbar_login",

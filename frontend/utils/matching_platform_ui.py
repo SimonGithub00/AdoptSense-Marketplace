@@ -341,6 +341,28 @@ def _info_box_html(label: str, value: str) -> str:
     )
 
 
+def _factor_card(fac: dict, kind: str = "positive"):
+    """Render a single adoption-factor card with green (helping) or red (hindering) tint."""
+    if kind == "positive":
+        bg = "#F0F9F2"          # light green
+        border = "#B5D8C0"
+        accent = "#2E7D32"      # darker green for label
+    else:
+        bg = "#FDF2F2"          # light red/rose
+        border = "#F5C2C2"
+        accent = "#B71C1C"      # darker red for label
+    html = (
+        f'<div style="background:{bg};border:1px solid {border};border-radius:10px;'
+        f'padding:12px 14px;margin-bottom:10px;">'
+        f'<div style="font-size:13px;font-weight:600;color:{accent};margin-bottom:4px;">'
+        f'{fac["label"]}</div>'
+        f'<div style="font-size:12px;color:{COLOR_TEXT_BODY};line-height:1.45;">'
+        f'{fac["sentence"]}</div>'
+        f'</div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def _render_manager_listing_panel(listing: dict, listing_id: int, photos: list):
     """The shelter-manager-only block on the detail page (KPIs, factors, photo studio)."""
     st.markdown("---")
@@ -378,19 +400,15 @@ def _render_manager_listing_panel(listing: dict, listing_id: int, photos: list):
     pos_f, neg_f = get_adoption_factors(pet_dict)
     fc1, fc2 = st.columns(2)
     with fc1:
-        st.markdown("**Helping adoption**")
+        st.markdown("**✅ Helping adoption**")
         for fac in pos_f:
-            with st.container(border=True):
-                st.markdown(f"**{fac['label']}**")
-                st.caption(fac["sentence"])
+            _factor_card(fac, kind="positive")
         if not pos_f:
             st.caption("No strong positive factors identified.")
     with fc2:
-        st.markdown("**Hindering adoption**")
+        st.markdown("**⚠️ Hindering adoption**")
         for fac in neg_f:
-            with st.container(border=True):
-                st.markdown(f"**{fac['label']}**")
-                st.caption(fac["sentence"])
+            _factor_card(fac, kind="negative")
         if not neg_f:
             st.caption("No significant hindering factors. Great profile!")
 
@@ -590,13 +608,66 @@ BREED_DATA = [
 ]
 
 
+def _render_publish_confirmation():
+    """Saved-confirmation screen shown after a successful publish.
+
+    Three CTAs: view the new listing, create another, go to My Listings.
+    All cleanups happen when the user picks one of the actions.
+    """
+    new_listing_id = st.session_state.get("_cl_published_id")
+    listing = db.get_listing(new_listing_id) if new_listing_id else None
+    pet_name = listing.get("pet_name", "Your pet") if listing else "Your pet"
+
+    st.markdown(
+        f'<div style="text-align:center;padding:48px 24px;">'
+        f'<div style="font-size:64px;margin-bottom:12px;">✅</div>'
+        f'<h1 style="font-size:32px;font-weight:600;color:{COLOR_PRIMARY};'
+        f'margin:0 0 8px;letter-spacing:-0.5px;">Listing published!</h1>'
+        f'<p style="font-size:15px;color:{COLOR_TEXT_MUTED};margin:0 0 32px;">'
+        f'<strong>{pet_name}</strong> is now visible to adopters. '
+        f'You can review or edit it at any time.</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        if st.button("View Listing", type="primary",
+                     use_container_width=True, key="pub_view"):
+            _clear_publish_state()
+            _nav("detail", mp_listing_id=new_listing_id)
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Create Another", type="secondary",
+                         use_container_width=True, key="pub_another"):
+                _clear_publish_state()
+                st.rerun()
+        with c2:
+            if st.button("Go to My Listings", type="secondary",
+                         use_container_width=True, key="pub_my"):
+                _clear_publish_state()
+                _nav("my_listings")
+
+
+def _clear_publish_state():
+    """Clear all create-listing form state and the post-publish flag."""
+    st.session_state.pop("_cl_just_published", None)
+    st.session_state.pop("_cl_published_id", None)
+    st.session_state.pop("cl_generated_desc", None)
+    for k in list(st.session_state.keys()):
+        if k.startswith("cl_") and k != "cl_gem_key":
+            st.session_state.pop(k, None)
+
+
 def render_create_listing(user: dict):
-    """Create-listing page — Simon's logic, themed AI ASSISTED header."""
-    if st.session_state.pop("_cl_just_published", False):
-        for k in list(st.session_state.keys()):
-            if k.startswith("cl_") and k != "cl_gem_key":
-                st.session_state.pop(k, None)
-        st.rerun()
+    """Create-listing page — Simon's logic, themed AI ASSISTED header.
+
+    If we just published a listing, show a Saved-confirmation screen first.
+    """
+    if st.session_state.get("_cl_just_published"):
+        _render_publish_confirmation()
+        return
 
     # Branded header with AI ASSISTED pill
     header_html = (
@@ -843,8 +914,11 @@ def render_create_listing(user: dict):
                 dest = _save_upload(uf, lid)
                 db.add_photo(lid, dest)
 
+        # Show a clear "Saved" confirmation screen instead of jumping straight to detail.
+        # User can choose: view the new listing, create another, or go to My Listings.
+        st.session_state["_cl_published_id"] = lid
         st.session_state["_cl_just_published"] = True
-        _nav("detail", mp_listing_id=lid)
+        st.rerun()
 
 
 # ── Edit Listing (carried from Simon, header restyled) ─────────────────────────

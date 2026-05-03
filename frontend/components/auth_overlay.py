@@ -66,6 +66,7 @@ def _render_login_form():
         ok, msg = auth.login(username, password)
         if ok:
             st.session_state.pop("show_auth", None)
+            st.session_state["_just_logged_in"] = True
             st.success(msg)
             st.rerun()
         else:
@@ -133,6 +134,7 @@ def _render_register_form():
                 # Auto-login after successful registration
                 auth.login(username, password)
                 st.session_state.pop("show_auth", None)
+                st.session_state["_just_logged_in"] = True
                 st.success(msg)
                 st.rerun()
             else:

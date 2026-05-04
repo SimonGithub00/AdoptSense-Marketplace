@@ -63,11 +63,35 @@ def _img_bytes(path: str) -> bytes | None:
 
 
 def _save_upload(uploaded, listing_id: int) -> str:
+    """Save an UploadedFile to disk. Robust against re-read corruption.
+
+    Streamlit's UploadedFile.read() can return a corrupt buffer when called
+    after previous reads on the same object across reruns (Windows + GC
+    timing). We seek-and-read defensively, and bail with a clear error
+    rather than writing zero bytes silently.
+    """
     dest_dir = UPLOAD_DIR / str(listing_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{uuid.uuid4().hex}_{uploaded.name}"
     dest = dest_dir / fname
-    dest.write_bytes(uploaded.read())
+    try:
+        uploaded.seek(0)
+    except Exception:
+        pass
+    data = uploaded.read()
+    if not data:
+        raise IOError(f"Upload {uploaded.name} produced empty bytes — file handle expired")
+    dest.write_bytes(data)
+    return str(dest)
+
+
+def _save_upload_bytes(name: str, data: bytes, listing_id: int) -> str:
+    """Save raw bytes (no UploadedFile) to the uploads dir."""
+    dest_dir = UPLOAD_DIR / str(listing_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"{uuid.uuid4().hex}_{name}"
+    dest = dest_dir / fname
+    dest.write_bytes(data)
     return str(dest)
 
 
@@ -742,67 +766,152 @@ def render_create_listing(user: dict):
         type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="cl_photos"
     )
 
-    # Photo enhancement loop (carried verbatim from Simon)
+    # Photo enhancement loop.
+    # Two AI paths per upload: Quick Studio (local rembg) and AI Studio
+    # (Gemini 2.5 Flash Image). Each is independent — running one does
+    # NOT replace the other. User picks at publish time which to use.
+    #
+    # IMPORTANT: read each upload's bytes ONCE per iteration and reuse the
+    # cached bytes. Calling uf.read() multiple times (even with seek(0)
+    # between calls) is unreliable across Streamlit reruns on some
+    # platforms — manifests as "OSError: broken data stream" from PIL.
     if uploaded_files:
         for i, uf in enumerate(uploaded_files):
-            studio_key = f"cl_studio_{i}"
+            bokeh_key = f"cl_bokeh_{i}"         # Bokeh (sharp pet on blurred BG) bytes
+            studio_key = f"cl_studio_{i}"       # Studio (sharp pet on backdrop) bytes
             studio_fn_key = f"cl_studio_fn_{i}"
-            choice_key = f"cl_studio_use_{i}"
+            choice_key = f"cl_studio_use_{i}"   # values: original / bokeh / studio
 
+            # When the file at this slot changes, clear all derived versions
             if st.session_state.get(studio_fn_key) != uf.name:
-                st.session_state.pop(studio_key, None)
-                st.session_state.pop(choice_key, None)
+                for k in (bokeh_key, studio_key, choice_key):
+                    st.session_state.pop(k, None)
             st.session_state[studio_fn_key] = uf.name
 
+            # Read the upload bytes ONCE
+            try:
+                uf.seek(0)
+                upload_bytes = uf.read()
+                uf.seek(0)
+                if not upload_bytes:
+                    st.warning(f"Could not read {uf.name} — skipping.")
+                    continue
+            except Exception as exc:
+                st.warning(f"Could not read {uf.name}: {exc}")
+                continue
+
+            bokeh_bytes = st.session_state.get(bokeh_key)
             studio_bytes = st.session_state.get(studio_key)
 
-            if studio_bytes:
-                st.caption(f"📸 **{uf.name}**")
-                ba1, ba2 = st.columns(2)
-                with ba1:
-                    st.caption("📷 Original")
-                    uf.seek(0)
-                    st.image(uf.read(), use_container_width=True)
-                    uf.seek(0)
-                with ba2:
-                    st.caption("✨ Studio version")
+            st.caption(f"📸 **{uf.name}**")
+
+            # ── Preview row: 3 columns side by side ────────────────────────
+            cols = st.columns(3)
+            with cols[0]:
+                st.caption("📷 Original")
+                st.image(upload_bytes, use_container_width=True)
+            with cols[1]:
+                st.caption("🌸 Bokeh")
+                if bokeh_bytes:
+                    st.image(bokeh_bytes, use_container_width=True)
+                else:
+                    st.markdown(
+                        "<div style='background:#F3F4F6;border-radius:8px;"
+                        "height:160px;display:flex;align-items:center;"
+                        "justify-content:center;color:#9CA3AF;font-size:13px;'>"
+                        "Not generated yet</div>",
+                        unsafe_allow_html=True,
+                    )
+            with cols[2]:
+                st.caption("🎨 Studio")
+                if studio_bytes:
                     st.image(studio_bytes, use_container_width=True)
+                else:
+                    st.markdown(
+                        "<div style='background:#F3F4F6;border-radius:8px;"
+                        "height:160px;display:flex;align-items:center;"
+                        "justify-content:center;color:#9CA3AF;font-size:13px;'>"
+                        "Not generated yet</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            # ── Action buttons row: Bokeh + Studio generate ────────────────
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                if st.button(
+                    "🌸 Generate Bokeh" if not bokeh_bytes else "🌸 Regenerate Bokeh",
+                    key=f"cl_bokeh_btn_{i}",
+                    use_container_width=True,
+                    help="Sharp pet on a blurred version of the original background — like a portrait shot. Best when the original setting is nice.",
+                ):
+                    ok_b = False
+                    with st.status("Creating Bokeh photo…", expanded=True) as status:
+                        status.write("✂️ Removing background…")
+                        status.write("📷 Blurring original scene…")
+                        ok_b, result = gemini_utils.make_bokeh_bytes(upload_bytes)
+                        if ok_b:
+                            st.session_state[bokeh_key] = result
+                            status.update(label="✅ Bokeh ready!", state="complete")
+                        else:
+                            status.update(label="❌ Processing failed", state="error")
+                    if ok_b:
+                        st.rerun()
+                    else:
+                        st.error(result)
+            with bc2:
+                if st.button(
+                    "🎨 Generate Studio" if not studio_bytes else "🎨 Regenerate Studio",
+                    key=f"cl_studio_btn_{i}",
+                    use_container_width=True,
+                    help="Sharp pet on a clean studio backdrop — colour chosen by Gemini to flatter the pet. Best when the original background is unflattering.",
+                ):
+                    ok_s = False
+                    with st.status("Creating Studio photo…", expanded=True) as status:
+                        status.write("🎨 Asking Gemini for the best backdrop colour…")
+                        gem_ok, bg_color = gemini_utils.get_studio_bg_color(upload_bytes)
+                        if not gem_ok:
+                            status.write("⚠️ Colour suggestion unavailable — using default.")
+                        status.write("✂️ Removing background and compositing…")
+                        ok_s, result = gemini_utils.make_studio_ready_bytes(upload_bytes, bg_color)
+                        if ok_s:
+                            st.session_state[studio_key] = result
+                            status.update(label="✅ Studio ready!", state="complete")
+                        else:
+                            status.update(label="❌ Processing failed", state="error")
+                    if ok_s:
+                        st.rerun()
+                    else:
+                        st.error(result)
+
+            # ── Choice radio ──────────────────────────────────────────────
+            if bokeh_bytes or studio_bytes:
+                options = ["original"]
+                option_labels = {"original": "📷 Original photo"}
+                if bokeh_bytes:
+                    options.append("bokeh")
+                    option_labels["bokeh"] = "🌸 Bokeh version"
+                if studio_bytes:
+                    options.append("studio")
+                    option_labels["studio"] = "🎨 Studio version"
+
+                # Default to Bokeh > Studio > Original (Bokeh tends to look more natural)
+                current = st.session_state.get(choice_key)
+                if current not in options:
+                    if "bokeh" in options:
+                        st.session_state[choice_key] = "bokeh"
+                    elif "studio" in options:
+                        st.session_state[choice_key] = "studio"
+                    else:
+                        st.session_state[choice_key] = "original"
+
                 st.radio(
                     "Which version to publish?",
-                    ["studio", "original"],
-                    format_func=lambda x: "✨ Studio version" if x == "studio" else "📷 Original photo",
-                    key=choice_key, horizontal=True,
+                    options,
+                    format_func=lambda x: option_labels[x],
+                    key=choice_key,
+                    horizontal=True,
                 )
-            else:
-                pc1, pc2 = st.columns([1, 4])
-                with pc1:
-                    uf.seek(0)
-                    st.image(uf.read(), width=90)
-                    uf.seek(0)
-                with pc2:
-                    st.caption(uf.name)
-                    if gemini_utils.is_configured():
-                        if st.button("✨ Make Studio Ready", key=f"cl_studio_btn_{i}"):
-                            uf.seek(0)
-                            img_data = uf.read()
-                            uf.seek(0)
-                            ok_s = False
-                            with st.status("Creating studio photo…", expanded=True) as status:
-                                status.write("🎨 Asking Gemini for the best backdrop colour…")
-                                gem_ok, bg_color = gemini_utils.get_studio_bg_color(img_data)
-                                if not gem_ok:
-                                    status.write("⚠️ Gemini colour suggestion unavailable — using default.")
-                                status.write("✂️ Removing background and compositing…")
-                                ok_s, result = gemini_utils.make_studio_ready_bytes(img_data, bg_color)
-                                if ok_s:
-                                    st.session_state[studio_key] = result
-                                    status.update(label="✅ Studio photo ready!", state="complete")
-                                else:
-                                    status.update(label="❌ Processing failed", state="error")
-                            if ok_s:
-                                st.rerun()
-                            else:
-                                st.error(result)
+            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.subheader("📝 Description")
@@ -901,18 +1010,35 @@ def render_create_listing(user: dict):
 
         for i, uf in enumerate(uploaded_files):
             choice = st.session_state.get(f"cl_studio_use_{i}", "original")
+            bokeh_b = st.session_state.get(f"cl_bokeh_{i}")
             studio_b = st.session_state.get(f"cl_studio_{i}")
-            if choice == "studio" and studio_b:
+
+            if choice == "bokeh" and bokeh_b:
                 dest_dir = UPLOAD_DIR / str(lid)
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 stem = uf.name.rsplit(".", 1)[0]
-                dest = dest_dir / f"{uuid.uuid4().hex}_{stem}.png"
+                dest = dest_dir / f"{uuid.uuid4().hex}_{stem}_bokeh.png"
+                dest.write_bytes(bokeh_b)
+                db.add_photo(lid, str(dest))
+            elif choice == "studio" and studio_b:
+                dest_dir = UPLOAD_DIR / str(lid)
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                stem = uf.name.rsplit(".", 1)[0]
+                dest = dest_dir / f"{uuid.uuid4().hex}_{stem}_studio.png"
                 dest.write_bytes(studio_b)
                 db.add_photo(lid, str(dest))
             else:
-                uf.seek(0)
-                dest = _save_upload(uf, lid)
-                db.add_photo(lid, dest)
+                try:
+                    uf.seek(0)
+                    raw = uf.read()
+                    if not raw:
+                        st.error(f"Could not save {uf.name} — upload buffer empty.")
+                        continue
+                    dest = _save_upload_bytes(uf.name, raw, lid)
+                    db.add_photo(lid, dest)
+                except Exception as exc:
+                    st.error(f"Failed to save {uf.name}: {exc}")
+                    continue
 
         # Show a clear "Saved" confirmation screen instead of jumping straight to detail.
         # User can choose: view the new listing, create another, or go to My Listings.

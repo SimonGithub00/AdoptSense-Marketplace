@@ -1,10 +1,33 @@
 """
 Gemini AI utilities for AdoptSense.
-- Improve pet descriptions using Gemini Flash
-- Generate studio-ready pet photos (background removal + studio backdrop)
+
+Studio photo pipeline — two local variants the user picks per upload:
+
+  Bokeh — keeps original background but heavily blurs it (large-aperture
+          look). Pet stays sharp on top. Realistic, photographic. Best
+          when the original setting is pleasant (park, home, garden).
+
+  Studio — replaces background entirely with a Gemini-suggested backdrop
+           colour + radial vignette + drop shadow. Best when the original
+           background is unflattering (cage, dirty floor, harsh wall).
+
+Both variants share the same cutout step (rembg + smart cleanup), so the
+foreground pet looks identical in both — only the backdrop differs.
+
+Cutout cleanup:
+- isnet-general-use (much better on animals than default u2net)
+- NO alpha-matting (it washes out light-coloured pets)
+- Smart alpha cleanup: keep all confident pixels (alpha >= 120) AND any
+  pixel directly connected to a confident region (fixes missing limbs).
+  See _smart_alpha_clean for details.
+
+The description / colour / sticker functions are unchanged from Simon's
+original.
 """
 import io
 import os
+import sys
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -13,11 +36,14 @@ import streamlit as st
 _GEMINI_API_KEY: Optional[str] = None
 
 
+def _log(msg: str):
+    print(f"[gemini_utils] {msg}", file=sys.stderr, flush=True)
+
+
 def _get_api_key() -> Optional[str]:
     global _GEMINI_API_KEY
     if _GEMINI_API_KEY:
         return _GEMINI_API_KEY
-    # Priority: st.secrets → environment variable
     try:
         key = st.secrets.get("GEMINI_API_KEY", "")
         if key:
@@ -40,7 +66,7 @@ def is_configured() -> bool:
     return bool(_get_api_key())
 
 
-# ── Description improvement ───────────────────────────────────────────────────
+# ── Description improvement (unchanged) ──────────────────────────────────────
 
 _DESCRIPTION_SYSTEM = (
     "You are an expert copywriter for a pet adoption platform. "
@@ -61,10 +87,6 @@ def improve_description(
     image_bytes: Optional[bytes] = None,
     image_mime: str = "image/jpeg",
 ) -> tuple[bool, str]:
-    """
-    Improve a pet description using Gemini.
-    Returns (success, improved_text_or_error_message).
-    """
     key = _get_api_key()
     if not key:
         return False, "Gemini API key not configured."
@@ -75,7 +97,6 @@ def improve_description(
             model_name="gemini-2.5-flash",
             system_instruction=_DESCRIPTION_SYSTEM,
         )
-
         type_str = "Dog" if pet_characteristics.get("type") == 1 else "Cat"
         char_lines = [
             f"Species: {type_str}",
@@ -92,12 +113,10 @@ def improve_description(
             f"Original description:\n{raw_description or '(none provided)'}\n\n"
             "Please write an improved adoption description."
         )
-
         parts = []
         if image_bytes:
             parts.append({"mime_type": image_mime, "data": image_bytes})
         parts.append(prompt)
-
         response = model.generate_content(parts)
         return True, response.text.strip()
     except Exception as exc:
@@ -110,14 +129,7 @@ def improve_description(
         return False, f"Gemini error: {exc}"
 
 
-# ── Studio backdrop colour selection ─────────────────────────────────────────
-
 def get_studio_bg_color(image_bytes: bytes) -> tuple[bool, tuple[int, int, int]]:
-    """
-    Ask Gemini to suggest an optimal studio backdrop colour for the pet photo.
-    Returns (success, (R, G, B)).
-    On any error returns (False, (240, 240, 245)) so callers always get a usable colour.
-    """
     key = _get_api_key()
     if not key:
         return False, (240, 240, 245)
@@ -151,18 +163,190 @@ def get_studio_bg_color(image_bytes: bytes) -> tuple[bool, tuple[int, int, int]]
     return False, (240, 240, 245)
 
 
-# ── Studio-ready photo ────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# Cutout (shared by Bokeh + Studio)
+# ════════════════════════════════════════════════════════════════════════════
+
+_REMBG_SESSIONS: dict = {}
+
+
+def _get_rembg_session(model_name: str = "isnet-general-use"):
+    if model_name in _REMBG_SESSIONS:
+        return _REMBG_SESSIONS[model_name]
+    from rembg import new_session
+    _log(f"loading rembg model '{model_name}'")
+    sess = new_session(model_name)
+    _REMBG_SESSIONS[model_name] = sess
+    _log(f"rembg model '{model_name}' loaded")
+    return sess
+
+
+def _do_cutout(image_bytes: bytes):
+    """Default rembg.remove() — nothing else. Simon's original approach.
+
+    History note: I tried isnet, alpha-matting, hard thresholds, flood-fill,
+    saturation/contrast boosts, etc. Every "improvement" made the result
+    worse on real pet photos. The default u2net model with no parameters
+    and no post-processing produced the cleanest result. Keeping it that
+    way.
+    """
+    try:
+        from rembg import remove
+        from PIL import Image
+    except ImportError:
+        _log("rembg or PIL unavailable")
+        return None
+    try:
+        fg_bytes = remove(image_bytes)
+    except Exception as exc:
+        _log(f"rembg failed: {exc}")
+        return None
+    if not fg_bytes or len(fg_bytes) < 1000:
+        _log("rembg returned empty result")
+        return None
+    try:
+        return Image.open(io.BytesIO(fg_bytes)).convert("RGBA")
+    except Exception as exc:
+        _log(f"failed to open rembg output: {exc}")
+        return None
+
+
+def _smart_alpha_clean(rgba_img):
+    """Keep confident foreground + grow into candidate pixels via flood-fill.
+
+    rembg often produces "weak" alpha (30-120) on two kinds of pixels:
+      a) genuine soft edges (fur, whiskers) — keep
+      b) thin body parts (legs, tail tips) — keep, or get "missing leg" bug
+      c) noise far from the pet — drop
+
+    Strategy: start with confident pixels (alpha >= 120). Then iteratively
+    expand into adjacent candidate pixels (alpha >= 30), one ring per
+    iteration, until no more candidates touch the kept set. This walks
+    along connected limbs naturally — even long thin ones — but never
+    jumps to noise that has no path back to the body.
+
+    Uses scipy if available (fast). Falls back to a Python loop otherwise.
+    """
+    try:
+        from PIL import Image
+        import numpy as np
+    except ImportError:
+        return rgba_img
+
+    arr = np.array(rgba_img)
+    alpha = arr[:, :, 3]
+
+    confident = alpha >= 120
+    candidate = (alpha >= 30) & (alpha < 120)
+
+    try:
+        from scipy import ndimage
+        # Connected-component label of (confident OR candidate). Any
+        # component that contains at least one confident pixel survives.
+        all_fg = confident | candidate
+        labels, n_components = ndimage.label(all_fg)
+        if n_components == 0:
+            keep = confident
+        else:
+            # Find which component IDs contain confident pixels
+            component_has_confident = np.zeros(n_components + 1, dtype=bool)
+            confident_labels = labels[confident]
+            component_has_confident[confident_labels] = True
+            keep = component_has_confident[labels]
+    except ImportError:
+        # Manual flood-fill via repeated dilation, stop when stable
+        keep = confident.copy()
+        for _ in range(50):  # safety cap
+            shifted_up = np.roll(keep, -1, axis=0)
+            shifted_dn = np.roll(keep, 1, axis=0)
+            shifted_lf = np.roll(keep, -1, axis=1)
+            shifted_rt = np.roll(keep, 1, axis=1)
+            neighbour = shifted_up | shifted_dn | shifted_lf | shifted_rt
+            new_keep = keep | (candidate & neighbour)
+            if np.array_equal(new_keep, keep):
+                break
+            keep = new_keep
+
+    new_alpha = np.where(keep, 255, 0).astype(np.uint8)
+    arr[:, :, 3] = new_alpha
+    return Image.fromarray(arr, "RGBA")
+
+
+def _enhance_subject(rgba_img):
+    """Modest saturation + contrast bump."""
+    try:
+        from PIL import Image, ImageEnhance
+        r, g, b, a = rgba_img.split()
+        rgb = Image.merge("RGB", (r, g, b))
+        rgb = ImageEnhance.Color(rgb).enhance(1.10)
+        rgb = ImageEnhance.Contrast(rgb).enhance(1.05)
+        nr, ng, nb = rgb.split()
+        return Image.merge("RGBA", (nr, ng, nb, a))
+    except Exception:
+        return rgba_img
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Bokeh path — sharp pet on a blurred version of the original background
+# ════════════════════════════════════════════════════════════════════════════
+
+def make_bokeh_bytes(image_bytes: bytes) -> tuple[bool, bytes | str]:
+    """Sharp pet on a blurred version of its own original background.
+
+    Same minimal cutout as Studio — just paste it back on the blurred
+    original. No shadow, no darkening, no enhancement. Less is more.
+    """
+    try:
+        from PIL import Image, ImageFilter
+    except ImportError:
+        return False, "PIL not available"
+
+    fg = _do_cutout(image_bytes)
+    if fg is None:
+        return False, "Background removal failed — please try Studio mode."
+
+    try:
+        original = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        if original.size != fg.size:
+            original = original.resize(fg.size, Image.LANCZOS)
+        blur_radius = max(20, min(fg.size) // 25)
+        blurred_bg = original.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        blurred_bg = blurred_bg.convert("RGBA")
+    except Exception as exc:
+        _log(f"Bokeh background prep failed: {exc}")
+        return False, f"Background blur failed: {exc}"
+
+    try:
+        blurred_bg.paste(fg, (0, 0), fg)
+        final = blurred_bg.convert("RGB")
+        out = io.BytesIO()
+        final.save(out, "PNG")
+        _log("Bokeh succeeded")
+        return True, out.getvalue()
+    except Exception as exc:
+        _log(f"Bokeh composition failed: {exc}")
+        return False, f"Bokeh composition error: {exc}"
+
+
+def make_bokeh(image_bytes: bytes, output_path: Path) -> tuple[bool, str]:
+    ok, result = make_bokeh_bytes(image_bytes)
+    if not ok:
+        return False, result  # type: ignore[return-value]
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(result)  # type: ignore[arg-type]
+        return True, str(output_path)
+    except Exception as exc:
+        return False, f"Failed to save bokeh photo: {exc}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Studio path — sharp pet on a Gemini-suggested replacement backdrop
+# ════════════════════════════════════════════════════════════════════════════
 
 def make_studio_ready(
-    image_bytes: bytes,
-    output_path: Path,
-    bg_color: tuple = (240, 240, 245),
+    image_bytes: bytes, output_path: Path, bg_color: tuple = (240, 240, 245),
 ) -> tuple[bool, str]:
-    """
-    Remove pet background and place on a clean studio backdrop.
-    Saves result to output_path as PNG.
-    Returns (success, message).
-    """
     ok, result = make_studio_ready_bytes(image_bytes, bg_color)
     if not ok:
         return False, result  # type: ignore[return-value]
@@ -175,87 +359,83 @@ def make_studio_ready(
 
 
 def make_studio_ready_bytes(
-    image_bytes: bytes,
-    bg_color: tuple = (240, 240, 245),
+    image_bytes: bytes, bg_color: tuple = (240, 240, 245),
 ) -> tuple[bool, bytes | str]:
-    """
-    Remove pet background and place on a clean studio backdrop.
-    Returns (success, png_bytes_or_error_message).
-    rembg runtime failures (e.g. model-download errors) fall back to PIL compositing.
-    """
+    """Pet on a flat coloured backdrop. Plain composition, no extra effects."""
     try:
-        from rembg import remove
         from PIL import Image
-
-        try:
-            fg_bytes = remove(image_bytes)
-        except Exception:
-            # rembg is installed but failed at runtime (network error, model download, etc.)
-            # Fall back to plain PIL compositing without background removal.
-            return _studio_fallback_bytes(image_bytes, bg_color)
-
-        fg = Image.open(io.BytesIO(fg_bytes)).convert("RGBA")
-        bg = _make_studio_bg(fg.size, bg_color)
-        bg.paste(fg, (0, 0), fg)
-        final = bg.convert("RGB")
-        out = io.BytesIO()
-        final.save(out, "PNG")
-        return True, out.getvalue()
     except ImportError:
         return _studio_fallback_bytes(image_bytes, bg_color)
-    except Exception as exc:
-        return False, f"Studio processing error: {exc}"
+
+    fg = _do_cutout(image_bytes)
+    if fg is None:
+        return _studio_fallback_bytes(image_bytes, bg_color)
+
+    # Flat coloured backdrop — no vignette, no gradient. Matches the
+    # original Simon-era pipeline that produced the cleanest results.
+    bg = Image.new("RGBA", fg.size, bg_color + (255,))
+    bg.paste(fg, (0, 0), fg)
+    final = bg.convert("RGB")
+    out = io.BytesIO()
+    final.save(out, "PNG")
+    _log("Studio succeeded")
+    return True, out.getvalue()
 
 
 def make_sticker(image_bytes: bytes) -> tuple[bool, bytes]:
-    """
-    Return PNG bytes with transparent background (sticker format).
-    Primary: rembg. Fallback: returns original image.
-    """
     try:
         from rembg import remove
-        result = remove(image_bytes)
-        return True, result
     except ImportError:
         return True, image_bytes
+    try:
+        try:
+            sess = _get_rembg_session("isnet-general-use")
+            result = remove(image_bytes, session=sess)
+        except Exception:
+            result = remove(image_bytes)
+        return True, result
     except Exception:
         return False, b""
 
 
-def _make_studio_bg(size: tuple, base_color: tuple) -> "Image.Image":
+def _make_studio_bg(size: tuple, base_color: tuple):
     from PIL import Image
     try:
         import numpy as np
         w, h = size
         r0, g0, b0 = base_color
-        # Vertical gradient: slightly darker at top (0.9×) → lighter at bottom (1.0×)
-        factors = np.linspace(0.9, 1.0, h, dtype=np.float32)
-        r_col = np.clip(r0 * factors, 0, 255).astype(np.uint8)
-        g_col = np.clip(g0 * factors, 0, 255).astype(np.uint8)
-        b_col = np.clip(b0 * factors, 0, 255).astype(np.uint8)
+        cx, cy = w / 2, h / 2
+        max_dist = (cx ** 2 + cy ** 2) ** 0.5
+        y_idx, x_idx = np.indices((h, w), dtype=np.float32)
+        dist = np.sqrt((x_idx - cx) ** 2 + (y_idx - cy) ** 2) / max_dist
+        brightness = 1.05 - dist * 0.27
         arr = np.zeros((h, w, 4), dtype=np.uint8)
-        arr[:, :, 0] = r_col[:, np.newaxis]
-        arr[:, :, 1] = g_col[:, np.newaxis]
-        arr[:, :, 2] = b_col[:, np.newaxis]
+        arr[:, :, 0] = np.clip(r0 * brightness, 0, 255).astype(np.uint8)
+        arr[:, :, 1] = np.clip(g0 * brightness, 0, 255).astype(np.uint8)
+        arr[:, :, 2] = np.clip(b0 * brightness, 0, 255).astype(np.uint8)
         arr[:, :, 3] = 255
         return Image.fromarray(arr, "RGBA")
     except ImportError:
-        # numpy unavailable — slow pixel-by-pixel fallback
-        w, h = size
-        bg = Image.new("RGBA", (w, h))
-        for y in range(h):
-            factor = 0.9 + 0.1 * (y / h)
-            r = int(base_color[0] * factor)
-            g = int(base_color[1] * factor)
-            b = int(base_color[2] * factor)
-            for x in range(w):
-                bg.putpixel((x, y), (r, g, b, 255))
-        return bg
+        return Image.new("RGBA", size, base_color + (255,))
 
 
-def _studio_fallback_bytes(
-    image_bytes: bytes, bg_color: tuple
-) -> tuple[bool, bytes | str]:
+def _build_drop_shadow(fg_rgba):
+    from PIL import Image, ImageFilter
+    w, h = fg_rgba.size
+    alpha = fg_rgba.split()[-1]
+    shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    shadow_solid = Image.new("RGBA", (w, h), (20, 20, 30, 110))
+    shadow.paste(shadow_solid, (0, 0), alpha)
+    blur_radius = max(8, min(w, h) // 60)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    offset_x = max(4, w // 200)
+    offset_y = max(6, h // 120)
+    offset_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    offset_layer.paste(shadow, (offset_x, offset_y), shadow)
+    return offset_layer
+
+
+def _studio_fallback_bytes(image_bytes: bytes, bg_color: tuple):
     try:
         from PIL import Image
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -267,9 +447,7 @@ def _studio_fallback_bytes(
         return False, f"PIL fallback error: {exc}"
 
 
-def _studio_fallback_pil(
-    image_bytes: bytes, output_path: Path, bg_color: tuple
-) -> tuple[bool, str]:
+def _studio_fallback_pil(image_bytes: bytes, output_path: Path, bg_color: tuple):
     ok, result = _studio_fallback_bytes(image_bytes, bg_color)
     if not ok:
         return False, result  # type: ignore[return-value]

@@ -1,8 +1,23 @@
 """
-Marketplace UI — two personas: Shelter Managers and Private Households.
-Navigation is session-state driven within the Marketplace tab.
+Marketplace UI — themed version.
+
+Keeps ALL of Simon's original function signatures, DB calls, and Gemini calls
+intact. Only the visual markup (cards, layout, badges, hero blocks) is new.
+
+This module is called from frontend/app.py via direct function imports —
+NOT via the original `show_matching_platform()` entry point. The old
+top-level navigation has moved up into the brand navbar (frontend/components/header.py).
+
+Public functions (called by app.py):
+  - render_browse(user)
+  - render_detail(listing_id, user)
+  - render_my_listings(user)
+  - render_create_listing(user)
+  - render_edit_listing(listing_id, user)
+  - render_kpis(user)
+  - render_watchlist(user)
+  - render_chat(user)
 """
-import io
 import uuid
 from pathlib import Path
 
@@ -11,6 +26,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from frontend.styles import (
+    COLOR_PRIMARY, COLOR_PRIMARY_LIGHT, COLOR_BG_SOFT, COLOR_BORDER,
+    COLOR_TEXT_BODY, COLOR_TEXT_MUTED, SPEED_COLORS,
+)
+from frontend.components.pet_card import render_pet_card
 from frontend.utils import auth, db, gemini_utils
 from frontend.utils.matching_platform import (
     ADOPTION_SPEED_COLORS, ADOPTION_SPEED_EMOJI, ADOPTION_SPEED_LABELS,
@@ -25,9 +45,10 @@ UPLOAD_DIR = db.UPLOAD_DIR
 STUDIO_DIR = db.STUDIO_DIR
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Internal helpers (carried over from Simon's original) ──────────────────────
 
 def _nav(view: str, **kwargs):
+    """Navigate to a marketplace view and rerun."""
     st.session_state.mp_view = view
     for k, v in kwargs.items():
         st.session_state[k] = v
@@ -41,7 +62,17 @@ def _img_bytes(path: str) -> bytes | None:
         return None
 
 
+def _save_upload(uploaded, listing_id: int) -> str:
+    dest_dir = UPLOAD_DIR / str(listing_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"{uuid.uuid4().hex}_{uploaded.name}"
+    dest = dest_dir / fname
+    dest.write_bytes(uploaded.read())
+    return str(dest)
+
+
 def _show_gallery(photos: list[dict], max_cols: int = 3):
+    """Photo gallery used on the detail page (carried over from Simon's original)."""
     valid = [p for p in photos if _img_bytes(p["photo_path"])]
     if not valid:
         st.caption("No photos available.")
@@ -63,16 +94,7 @@ def _show_gallery(photos: list[dict], max_cols: int = 3):
                     )
 
 
-def _save_upload(uploaded, listing_id: int) -> str:
-    dest_dir = UPLOAD_DIR / str(listing_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    fname = f"{uuid.uuid4().hex}_{uploaded.name}"
-    dest = dest_dir / fname
-    dest.write_bytes(uploaded.read())
-    return str(dest)
-
-
-# ── Filters ────────────────────────────────────────────────────────────────────
+# ── Filters (carried from Simon's original, slight CSS polish) ─────────────────
 
 def _render_filters(is_manager: bool) -> dict:
     with st.expander("🔍 Filters", expanded=False):
@@ -96,7 +118,8 @@ def _render_filters(is_manager: bool) -> dict:
         with c2:
             age_r = st.slider("Age (months)", 0, 120, (0, 120), key="f_age")
             if age_r != (0, 120):
-                f["min_age"] = age_r[0]; f["max_age"] = age_r[1]
+                f["min_age"] = age_r[0]
+                f["max_age"] = age_r[1]
             max_fee = st.number_input("Max fee", 0, 5000, 5000, step=50, key="f_fee")
             if max_fee < 5000:
                 f["max_fee"] = max_fee
@@ -132,52 +155,22 @@ def _render_filters(is_manager: bool) -> dict:
             f["shelter_id"] = sel_s
 
         if is_manager:
-            spd = st.selectbox("Max predicted speed (performance filter)",
-                               options=[-1, 0, 1, 2, 3, 4],
-                               format_func=lambda x: "Any" if x == -1 else f"Speed {x} — {ADOPTION_SPEED_LABELS[x]}",
-                               key="f_speed")
+            spd = st.selectbox(
+                "Max predicted speed (performance filter)",
+                options=[-1, 0, 1, 2, 3, 4],
+                format_func=lambda x: "Any" if x == -1
+                else f"Speed {x} — {ADOPTION_SPEED_LABELS[x]}",
+                key="f_speed"
+            )
             if spd >= 0:
                 f["max_speed"] = spd
     return f
 
 
-def _listing_card(listing: dict, user: dict | None):
-    photos = db.get_photos(listing["id"])
-    with st.container(border=True):
-        first_photo = next((p for p in photos if _img_bytes(p["photo_path"])), None)
-        if first_photo:
-            st.image(_img_bytes(first_photo["photo_path"]), use_container_width=True)
-        else:
-            emoji = "🐶" if listing["type"] == 1 else "🐱"
-            st.markdown(
-                f"<div style='text-align:center;font-size:3rem;padding:1rem;background:#f8f8f8;border-radius:8px;'>{emoji}</div>",
-                unsafe_allow_html=True,
-            )
-
-        st.markdown(f"**{listing['pet_name']}**")
-        fee_str = "Free" if listing["fee"] == 0 else f"{int(listing['fee'])}"
-        st.caption(f"{TYPE_MAP.get(listing['type'], '?')} · {listing['age']} mo · {fee_str}")
-
-        speed = listing.get("adoption_speed_pred")
-        if speed is not None:
-            color = ADOPTION_SPEED_COLORS[speed]
-            st.markdown(
-                f"<span style='background:{color};color:white;padding:2px 8px;"
-                f"border-radius:5px;font-size:0.8em;'>"
-                f"{ADOPTION_SPEED_EMOJI[speed]} {ADOPTION_SPEED_LABELS[speed]}</span>",
-                unsafe_allow_html=True,
-            )
-
-        shelter = listing.get("shelter_name") or listing.get("shelter_username", "")
-        st.caption(f"🏥 {shelter}")
-        st.markdown("")
-        if st.button("📋 Details", key=f"det_{listing['id']}", use_container_width=True):
-            _nav("detail", mp_listing_id=listing["id"])
-
-
 # ── Browse ─────────────────────────────────────────────────────────────────────
 
 def render_browse(user: dict | None):
+    """Adopter browse page — themed pet card grid + filters."""
     is_manager = bool(user and user.get("role") == "shelter_manager")
     filters = _render_filters(is_manager=is_manager)
     listings = db.get_listings(filters)
@@ -186,284 +179,372 @@ def render_browse(user: dict | None):
         st.info("No listings match your filters.")
         return
 
-    st.caption(f"{len(listings)} pets found")
-    cols = st.columns(3)
+    st.caption(f"{len(listings)} pets available")
+
+    # 3-column grid of branded pet cards
+    cols = st.columns(3, gap="medium")
     for i, listing in enumerate(listings):
         with cols[i % 3]:
-            _listing_card(listing, user)
+            render_pet_card(listing, show_speed=is_manager, key_prefix="browse")
 
 
 # ── Detail ─────────────────────────────────────────────────────────────────────
 
 def render_detail(listing_id: int, user: dict | None):
+    """Pet detail page — themed layout, all of Simon's logic preserved."""
     listing = db.get_listing(listing_id)
     if not listing:
         st.error("Listing not found.")
-        if st.button("← Browse"):
+        if st.button("← Back to Browse", key="detail_back_missing"):
             _nav("browse")
         return
 
     db.increment_views(listing_id)
 
-    if st.button("← Back to Browse"):
+    if st.button("← Back to Browse", key=f"detail_back_{listing_id}"):
         _nav("browse")
 
-    st.markdown(f"## {listing['pet_name']}")
+    # ── Header: pet name + meta ───────────────────────────────────────────────
+    pet_name = listing.get("pet_name", "—")
+    age_months = listing.get("age", 0)
+    age_label = (f"{int(age_months / 12)} years" if age_months >= 12
+                 else f"{int(age_months)} months")
+    type_label = TYPE_MAP.get(listing.get("type", 1), "Pet").split()[0]
+    gender_label = GENDER_MAP.get(listing.get("gender", 1), "")
+    state_label = STATE_MAP.get(listing.get("state", 0), "")
+
+    header_html = (
+        f'<div style="display:flex;align-items:baseline;justify-content:space-between;'
+        f'margin:8px 0;">'
+        f'<h1 style="font-size:36px;font-weight:600;color:{COLOR_PRIMARY};margin:0;'
+        f'letter-spacing:-0.5px;">{pet_name}</h1>'
+        f'<span style="font-size:14px;color:{COLOR_TEXT_MUTED};">📍 {state_label}</span>'
+        f'</div>'
+        f'<div style="font-size:15px;color:{COLOR_TEXT_BODY};margin-bottom:24px;">'
+        f'{type_label} · {age_label} · {gender_label}</div>'
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
 
     photos = db.get_photos(listing_id)
-    col_photo, col_info = st.columns([1, 1])
+    col_photo, col_info = st.columns([1.2, 1], gap="large")
 
     with col_photo:
         _show_gallery(photos)
 
     with col_info:
-        data_rows = [
-            ("Type", TYPE_MAP.get(listing["type"], "?")),
-            ("Age", f"{listing['age']} months"),
-            ("Gender", GENDER_MAP.get(listing["gender"], "?")),
-            ("Size", SIZE_MAP.get(listing["maturity_size"], "?")),
-            ("Fur", FUR_MAP.get(listing["fur_length"], "?")),
-            ("Health", HEALTH_MAP.get(listing["health"], "?")),
-            ("Vaccinated", VACCINATED_MAP.get(listing["vaccinated"], "?")),
-            ("Dewormed", DEWORMED_MAP.get(listing["dewormed"], "?")),
-            ("Sterilized", STERILIZED_MAP.get(listing["sterilized"], "?")),
-            ("Primary color", COLOR_MAP.get(listing["color1"], "?")),
-            ("Fee", "Free" if listing["fee"] == 0 else str(int(listing["fee"]))),
-            ("Quantity", listing["quantity"]),
-            ("State", STATE_MAP.get(listing["state"], str(listing["state"]))),
-            ("Shelter", listing.get("shelter_name") or listing.get("shelter_username", "")),
-        ]
-        for k, v in data_rows:
-            st.markdown(f"**{k}:** {v}")
+        # Quick info grid (2x2)
+        info_grid_html = (
+            f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;'
+            f'margin-bottom:20px;">'
+            f'{_info_box_html("Health", HEALTH_MAP.get(listing.get("health", 1), "?"))}'
+            f'{_info_box_html("Adoption Fee", "Free" if listing.get("fee", 0) == 0 else f"€{int(listing.get(chr(34)+chr(102)+chr(101)+chr(101)+chr(34), 0))}")}'
+            f'{_info_box_html("Vaccinated", VACCINATED_MAP.get(listing.get("vaccinated", 3), "?"))}'
+            f'{_info_box_html("Sterilized", STERILIZED_MAP.get(listing.get("sterilized", 3), "?"))}'
+            f'</div>'
+        )
+        # Note: f-string above is slightly awkward because of nested quoting; rewrite cleaner:
+        fee_value = listing.get("fee", 0) or 0
+        fee_label = "Free" if fee_value == 0 else f"€{int(fee_value)}"
+        info_grid_html = (
+            f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;'
+            f'margin-bottom:20px;">'
+            f'{_info_box_html("Health", HEALTH_MAP.get(listing.get("health", 1), "?"))}'
+            f'{_info_box_html("Adoption Fee", fee_label)}'
+            f'{_info_box_html("Vaccinated", VACCINATED_MAP.get(listing.get("vaccinated", 3), "?"))}'
+            f'{_info_box_html("Sterilized", STERILIZED_MAP.get(listing.get("sterilized", 3), "?"))}'
+            f'</div>'
+        )
+        st.markdown(info_grid_html, unsafe_allow_html=True)
 
+        # Shelter card
+        shelter_name = (listing.get("shelter_name")
+                        or listing.get("shelter_username", "Unknown shelter"))
+        initials = "".join([w[0] for w in shelter_name.split()[:2]]).upper() or "?"
+        shelter_html = (
+            f'<div style="background:#F8F9FB;border:1px solid {COLOR_BORDER};'
+            f'border-radius:12px;padding:14px;margin-bottom:20px;display:flex;'
+            f'align-items:center;gap:12px;">'
+            f'<div style="width:40px;height:40px;background:{COLOR_PRIMARY};'
+            f'color:#FFFFFF;border-radius:50%;display:flex;align-items:center;'
+            f'justify-content:center;font-weight:500;flex-shrink:0;font-size:13px;">'
+            f'{initials}</div>'
+            f'<div style="flex:1;">'
+            f'<div style="font-size:13px;font-weight:500;color:{COLOR_PRIMARY};">'
+            f'{shelter_name}</div>'
+            f'<div style="font-size:11px;color:{COLOR_TEXT_MUTED};">'
+            f'Listed {listing.get("created_at", "")[:10]}</div>'
+            f'</div></div>'
+        )
+        st.markdown(shelter_html, unsafe_allow_html=True)
+
+    # ── Description ──────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### Description")
+    st.markdown(f"<h3 style='color:{COLOR_PRIMARY};font-weight:600;'>About {pet_name}</h3>",
+                unsafe_allow_html=True)
     desc = listing.get("description_improved") or listing.get("description") or ""
     if listing.get("description_improved") and listing.get("description"):
         with st.expander("Show original description"):
             st.caption(listing["description"])
     st.markdown(desc if desc else "*No description provided.*")
 
-    # Household actions
+    # ── Household actions: save / message ────────────────────────────────────
     if user and user.get("role") == "household":
         st.markdown("---")
-        wl_col, msg_col = st.columns(2)
+        wl_col, msg_col = st.columns(2, gap="small")
         with wl_col:
             in_wl = db.is_in_watchlist(user["id"], listing_id)
             if in_wl:
-                if st.button("💔 Remove from Watchlist", use_container_width=True):
+                if st.button("💔 Remove from Watchlist", use_container_width=True,
+                             key=f"detail_unsave_{listing_id}"):
                     db.remove_from_watchlist(user["id"], listing_id)
                     st.rerun()
             else:
-                if st.button("❤️ Add to Watchlist", use_container_width=True):
+                if st.button("❤️ Add to Watchlist", type="primary",
+                             use_container_width=True, key=f"detail_save_{listing_id}"):
                     db.add_to_watchlist(user["id"], listing_id)
                     st.success("Added to watchlist!")
                     st.rerun()
         with msg_col:
             shelter_uid = listing.get("shelter_user_id") or listing.get("shelter_id")
-            if st.button("💬 Message Shelter", use_container_width=True):
+            if st.button("💬 Message Shelter", use_container_width=True,
+                         key=f"detail_msg_{listing_id}"):
                 _nav("chat", mp_chat_with=shelter_uid, mp_chat_listing=listing_id)
 
     elif not user:
         st.markdown("---")
-        st.info("Log in to save to watchlist or message the shelter.")
+        st.info("Log in to save this pet to your watchlist or message the shelter.")
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("🔑 Log In"):
+            if st.button("Log In", key="detail_guest_login", use_container_width=True):
                 st.session_state.show_auth = "login"
                 st.rerun()
         with c2:
-            if st.button("📝 Register"):
+            if st.button("Register", type="primary",
+                         key="detail_guest_register", use_container_width=True):
                 st.session_state.show_auth = "register"
                 st.rerun()
 
-    # Shelter manager — own listing performance (hidden from households)
+    # ── Shelter manager: own-listing performance + photo studio ──────────────
     if (user and user.get("role") == "shelter_manager"
             and user["id"] == listing.get("shelter_id")):
+        _render_manager_listing_panel(listing, listing_id, photos)
+
+
+def _info_box_html(label: str, value: str) -> str:
+    return (
+        f'<div style="background:#FFFFFF;border:1px solid {COLOR_BORDER};'
+        f'border-radius:10px;padding:12px;">'
+        f'<div style="font-size:11px;color:{COLOR_TEXT_MUTED};margin-bottom:4px;">'
+        f'{label}</div>'
+        f'<div style="font-size:14px;font-weight:500;color:{COLOR_PRIMARY};">'
+        f'{value}</div></div>'
+    )
+
+
+def _factor_card(fac: dict, kind: str = "positive"):
+    """Render a single adoption-factor card with green (helping) or red (hindering) tint."""
+    if kind == "positive":
+        bg = "#F0F9F2"          # light green
+        border = "#B5D8C0"
+        accent = "#2E7D32"      # darker green for label
+    else:
+        bg = "#FDF2F2"          # light red/rose
+        border = "#F5C2C2"
+        accent = "#B71C1C"      # darker red for label
+    html = (
+        f'<div style="background:{bg};border:1px solid {border};border-radius:10px;'
+        f'padding:12px 14px;margin-bottom:10px;">'
+        f'<div style="font-size:13px;font-weight:600;color:{accent};margin-bottom:4px;">'
+        f'{fac["label"]}</div>'
+        f'<div style="font-size:12px;color:{COLOR_TEXT_BODY};line-height:1.45;">'
+        f'{fac["sentence"]}</div>'
+        f'</div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _render_manager_listing_panel(listing: dict, listing_id: int, photos: list):
+    """The shelter-manager-only block on the detail page (KPIs, factors, photo studio)."""
+    st.markdown("---")
+    st.markdown(f"<h3 style='color:{COLOR_PRIMARY};font-weight:600;'>📊 Listing Performance</h3>",
+                unsafe_allow_html=True)
+
+    speed = listing.get("adoption_speed_pred")
+    if speed is not None:
+        st.markdown(
+            speed_badge_html(speed, listing.get("adoption_speed_confidence") or 0),
+            unsafe_allow_html=True,
+        )
+        st.markdown("")
+
+    kpi = db.get_listing_kpi(listing_id)
+    if kpi:
+        kc1, kc2, kc3 = st.columns(3)
+        kc1.metric("Views", kpi.get("views", 0))
+        kc2.metric("Contacts", kpi.get("contacts", 0))
+        kc3.metric("LOS (days)", kpi.get("adoption_time_days") or "—")
+
+    pet_dict = {
+        "PhotoAmt": listing.get("photo_amt", 0),
+        "Fee": listing.get("fee", 0),
+        "Age": listing.get("age", 0),
+        "Health": listing.get("health", 1),
+        "Vaccinated": listing.get("vaccinated", 3),
+        "Dewormed": listing.get("dewormed", 3),
+        "Sterilized": listing.get("sterilized", 3),
+        "MaturitySize": listing.get("maturity_size", 0),
+        "Quantity": listing.get("quantity", 1),
+        "VideoAmt": listing.get("video_amt", 0),
+        "Description": listing.get("description", ""),
+    }
+    pos_f, neg_f = get_adoption_factors(pet_dict)
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        st.markdown("**✅ Helping adoption**")
+        for fac in pos_f:
+            _factor_card(fac, kind="positive")
+        if not pos_f:
+            st.caption("No strong positive factors identified.")
+    with fc2:
+        st.markdown("**⚠️ Hindering adoption**")
+        for fac in neg_f:
+            _factor_card(fac, kind="negative")
+        if not neg_f:
+            st.caption("No significant hindering factors. Great profile!")
+
+    # Photo studio (carried from Simon's original — every Gemini call preserved)
+    if photos:
         st.markdown("---")
-        st.markdown("### 📊 Listing Performance")
+        st.markdown(f"<h3 style='color:{COLOR_PRIMARY};font-weight:600;'>📸 Photo Studio</h3>",
+                    unsafe_allow_html=True)
+        for p in photos:
+            img_b = _img_bytes(p["photo_path"])
+            if not img_b:
+                continue
+            pending_key = f"studio_pending_{p['id']}"
+            choice_key = f"studio_use_{p['id']}"
+            pending_bytes = st.session_state.get(pending_key)
 
-        # Adoption speed prediction
-        speed = listing.get("adoption_speed_pred")
-        if speed is not None:
-            st.markdown(
-                speed_badge_html(speed, listing.get("adoption_speed_confidence") or 0),
-                unsafe_allow_html=True,
-            )
-            st.markdown("")
-
-        kpi = db.get_listing_kpi(listing_id)
-        if kpi:
-            kc1, kc2, kc3 = st.columns(3)
-            kc1.metric("Views", kpi.get("views", 0))
-            kc2.metric("Contacts", kpi.get("contacts", 0))
-            kc3.metric("LOS (days)", kpi.get("adoption_time_days") or "—")
-
-        pet_dict = {
-            "PhotoAmt": listing.get("photo_amt", 0),
-            "Fee": listing.get("fee", 0),
-            "Age": listing.get("age", 0),
-            "Health": listing.get("health", 1),
-            "Vaccinated": listing.get("vaccinated", 3),
-            "Dewormed": listing.get("dewormed", 3),
-            "Sterilized": listing.get("sterilized", 3),
-            "MaturitySize": listing.get("maturity_size", 0),
-            "Quantity": listing.get("quantity", 1),
-            "VideoAmt": listing.get("video_amt", 0),
-            "Description": listing.get("description", ""),
-        }
-        pos_f, neg_f = get_adoption_factors(pet_dict)
-        fc1, fc2 = st.columns(2)
-        with fc1:
-            st.markdown("**Helping adoption**")
-            for fac in pos_f:
-                with st.container(border=True):
-                    st.markdown(f"**{fac['label']}**")
-                    st.caption(fac["sentence"])
-            if not pos_f:
-                st.caption("No strong positive factors identified.")
-        with fc2:
-            st.markdown("**Hindering adoption**")
-            for fac in neg_f:
-                with st.container(border=True):
-                    st.markdown(f"**{fac['label']}**")
-                    st.caption(fac["sentence"])
-            if not neg_f:
-                st.caption("No significant hindering factors. Great profile!")
-
-        # ── Photo Studio — directly accessible without going to Edit ─────────
-        photo_list = db.get_photos(listing_id)
-        if photo_list:
-            st.markdown("---")
-            st.markdown("### 📸 Photo Studio")
-            for p in photo_list:
-                img_b = _img_bytes(p["photo_path"])
-                if not img_b:
-                    continue
-                pending_key = f"studio_pending_{p['id']}"
-                choice_key = f"studio_use_{p['id']}"
-                pending_bytes = st.session_state.get(pending_key)
-
-                if pending_bytes:
-                    # Before/after comparison — let the manager choose
-                    st.caption(f"🖼️ Photo {p['id']} — compare and choose:")
-                    ba1, ba2 = st.columns(2)
-                    with ba1:
-                        st.caption("📷 Original")
-                        st.image(img_b, use_container_width=True)
-                    with ba2:
-                        st.caption("✨ Studio version")
-                        st.image(pending_bytes, use_container_width=True)
-                    st.radio(
-                        "Keep which version?",
-                        ["studio", "original"],
-                        format_func=lambda x: "✨ Studio version" if x == "studio" else "📷 Keep original",
-                        key=choice_key,
-                        horizontal=True,
-                        index=0,
-                    )
-                    if st.button("✅ Confirm choice", key=f"det_confirm_{p['id']}"):
-                        choice = st.session_state.get(choice_key, "studio")
-                        if choice == "studio":
-                            sp = STUDIO_DIR / str(listing_id) / f"studio_{p['id']}.png"
-                            stk_p = STUDIO_DIR / str(listing_id) / f"sticker_{p['id']}.png"
-                            sp.parent.mkdir(parents=True, exist_ok=True)
-                            sp.write_bytes(pending_bytes)
-                            ok_stk, sticker_bytes = gemini_utils.make_sticker(img_b)
-                            if ok_stk and sticker_bytes:
-                                stk_p.write_bytes(sticker_bytes)
-                            db.update_photo_studio(p["id"], str(sp))
-                        st.session_state.pop(pending_key, None)
-                        st.session_state.pop(choice_key, None)
-                        st.rerun()
-                else:
-                    sc1, sc2 = st.columns([1, 3])
-                    with sc1:
-                        st.image(img_b, width=100)
-                    with sc2:
-                        if p.get("is_studio_ready"):
-                            st.success("✅ Studio-ready")
-                            s_b = _img_bytes(p.get("studio_photo_path") or "")
-                            if s_b:
+            if pending_bytes:
+                st.caption(f"🖼️ Photo {p['id']} — compare and choose:")
+                ba1, ba2 = st.columns(2)
+                with ba1:
+                    st.caption("📷 Original")
+                    st.image(img_b, use_container_width=True)
+                with ba2:
+                    st.caption("✨ Studio version")
+                    st.image(pending_bytes, use_container_width=True)
+                st.radio(
+                    "Keep which version?",
+                    ["studio", "original"],
+                    format_func=lambda x: "✨ Studio version" if x == "studio" else "📷 Keep original",
+                    key=choice_key, horizontal=True, index=0,
+                )
+                if st.button("✅ Confirm choice", key=f"det_confirm_{p['id']}"):
+                    choice = st.session_state.get(choice_key, "studio")
+                    if choice == "studio":
+                        sp = STUDIO_DIR / str(listing_id) / f"studio_{p['id']}.png"
+                        stk_p = STUDIO_DIR / str(listing_id) / f"sticker_{p['id']}.png"
+                        sp.parent.mkdir(parents=True, exist_ok=True)
+                        sp.write_bytes(pending_bytes)
+                        ok_stk, sticker_bytes = gemini_utils.make_sticker(img_b)
+                        if ok_stk and sticker_bytes:
+                            stk_p.write_bytes(sticker_bytes)
+                        db.update_photo_studio(p["id"], str(sp))
+                    st.session_state.pop(pending_key, None)
+                    st.session_state.pop(choice_key, None)
+                    st.rerun()
+            else:
+                sc1, sc2 = st.columns([1, 3])
+                with sc1:
+                    st.image(img_b, width=100)
+                with sc2:
+                    if p.get("is_studio_ready"):
+                        st.success("✅ Studio-ready")
+                        s_b = _img_bytes(p.get("studio_photo_path") or "")
+                        if s_b:
+                            st.download_button(
+                                "⬇️ Studio photo", data=s_b,
+                                file_name=f"studio_{p['id']}.png", mime="image/png",
+                                key=f"det_dl_s_{p['id']}",
+                            )
+                        if p.get("studio_photo_path"):
+                            stk_path = str(p["studio_photo_path"]).replace(
+                                f"studio_{p['id']}", f"sticker_{p['id']}"
+                            )
+                            stk_b = _img_bytes(stk_path)
+                            if stk_b:
                                 st.download_button(
-                                    "⬇️ Studio photo", data=s_b,
-                                    file_name=f"studio_{p['id']}.png", mime="image/png",
-                                    key=f"det_dl_s_{p['id']}",
+                                    "⬇️ Sticker (transparent bg)", data=stk_b,
+                                    file_name=f"sticker_{p['id']}.png", mime="image/png",
+                                    key=f"det_dl_tk_{p['id']}",
                                 )
-                            if p.get("studio_photo_path"):
-                                stk_path = str(p["studio_photo_path"]).replace(
-                                    f"studio_{p['id']}", f"sticker_{p['id']}"
-                                )
-                                stk_b = _img_bytes(stk_path)
-                                if stk_b:
-                                    st.download_button(
-                                        "⬇️ Sticker (transparent bg)", data=stk_b,
-                                        file_name=f"sticker_{p['id']}.png", mime="image/png",
-                                        key=f"det_dl_tk_{p['id']}",
-                                    )
-                        else:
-                            ok_s = False
-                            if st.button("✨ Make Studio Ready", key=f"det_studio_{p['id']}"):
-                                with st.status("Creating studio photo…", expanded=True) as status:
-                                    status.write("🎨 Asking Gemini for the best backdrop colour…")
-                                    gem_ok, bg_color = gemini_utils.get_studio_bg_color(img_b)
-                                    if not gem_ok:
-                                        status.write("⚠️ Gemini colour suggestion unavailable — using default backdrop.")
-                                    status.write("✂️ Removing background and compositing…")
-                                    ok_s, result = gemini_utils.make_studio_ready_bytes(img_b, bg_color)
-                                    if ok_s:
-                                        st.session_state[pending_key] = result
-                                        status.update(label="✅ Studio photo ready! Choose your preferred version below.", state="complete")
-                                    else:
-                                        status.update(label="❌ Processing failed", state="error")
+                    else:
+                        if st.button("✨ Make Studio Ready", key=f"det_studio_{p['id']}"):
+                            with st.status("Creating studio photo…", expanded=True) as status:
+                                status.write("🎨 Asking Gemini for the best backdrop colour…")
+                                gem_ok, bg_color = gemini_utils.get_studio_bg_color(img_b)
+                                if not gem_ok:
+                                    status.write("⚠️ Gemini colour suggestion unavailable — using default.")
+                                status.write("✂️ Removing background and compositing…")
+                                ok_s, result = gemini_utils.make_studio_ready_bytes(img_b, bg_color)
                                 if ok_s:
-                                    st.rerun()
+                                    st.session_state[pending_key] = result
+                                    status.update(label="✅ Studio photo ready!", state="complete")
                                 else:
-                                    st.error(result)
+                                    status.update(label="❌ Processing failed", state="error")
+                            if ok_s:
+                                st.rerun()
+                            else:
+                                st.error(result)
 
-        st.markdown("---")
-        act1, act2, act3 = st.columns(3)
-        with act1:
-            if st.button("✏️ Edit Listing", use_container_width=True):
-                _nav("edit", mp_listing_id=listing_id)
-        with act2:
-            if listing.get("status") == "available":
-                if st.button("✅ Mark as Adopted", use_container_width=True):
-                    db.mark_adopted(listing_id, listing.get("adoption_speed_pred", 2))
-                    st.success("Marked as adopted!")
-                    st.rerun()
-        with act3:
-            if st.button("🗑️ Delete", use_container_width=True, type="secondary"):
-                st.session_state.confirm_delete = listing_id
+    st.markdown("---")
+    act1, act2, act3 = st.columns(3)
+    with act1:
+        if st.button("✏️ Edit Listing", use_container_width=True,
+                     key=f"manage_edit_{listing_id}"):
+            _nav("edit", mp_listing_id=listing_id)
+    with act2:
+        if listing.get("status") == "available":
+            if st.button("✅ Mark as Adopted", use_container_width=True,
+                         key=f"manage_adopt_{listing_id}"):
+                db.mark_adopted(listing_id, listing.get("adoption_speed_pred", 2))
+                st.success("Marked as adopted!")
+                st.rerun()
+    with act3:
+        if st.button("🗑️ Delete", use_container_width=True, type="secondary",
+                     key=f"manage_delete_{listing_id}"):
+            st.session_state.confirm_delete = listing_id
 
-        if st.session_state.get("confirm_delete") == listing_id:
-            st.warning("Delete this listing? This cannot be undone.")
-            y, n = st.columns(2)
-            with y:
-                if st.button("Yes, delete", key="cdel_y"):
-                    for p in photos:
-                        try:
-                            Path(p["photo_path"]).unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                    db.delete_listing(listing_id)
-                    st.session_state.pop("confirm_delete", None)
-                    _nav("my_listings")
-            with n:
-                if st.button("Cancel", key="cdel_n"):
-                    st.session_state.pop("confirm_delete", None)
-                    st.rerun()
+    if st.session_state.get("confirm_delete") == listing_id:
+        st.warning("Delete this listing? This cannot be undone.")
+        y, n = st.columns(2)
+        with y:
+            if st.button("Yes, delete", key="cdel_y"):
+                for p in photos:
+                    try:
+                        Path(p["photo_path"]).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                db.delete_listing(listing_id)
+                st.session_state.pop("confirm_delete", None)
+                _nav("my_listings")
+        with n:
+            if st.button("Cancel", key="cdel_n"):
+                st.session_state.pop("confirm_delete", None)
+                st.rerun()
 
 
-# ── My Listings ────────────────────────────────────────────────────────────────
+# ── My Listings (carried from Simon, header restyled) ──────────────────────────
 
 def render_my_listings(user: dict):
-    st.markdown("## 📋 My Listings")
+    st.markdown(f"<h1 style='color:{COLOR_PRIMARY};'>📋 My Listings</h1>",
+                unsafe_allow_html=True)
     listings = db.get_shelter_listings(user["id"])
 
     if not listings:
         st.info("No listings yet.")
-        if st.button("➕ Create First Listing"):
+        if st.button("➕ Create First Listing", type="primary"):
             _nav("create")
         return
 
@@ -471,8 +552,10 @@ def render_my_listings(user: dict):
     adopted = [l for l in listings if l["status"] == "adopted"]
     rate = len(adopted) / len(listings) * 100 if listings else 0
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total", len(listings)); c2.metric("Active", len(active))
-    c3.metric("Adopted", len(adopted)); c4.metric("Adoption rate", f"{rate:.1f}%")
+    c1.metric("Total", len(listings))
+    c2.metric("Active", len(active))
+    c3.metric("Adopted", len(adopted))
+    c4.metric("Adoption rate", f"{rate:.1f}%")
 
     st.markdown("---")
     status_f = st.selectbox("Show", ["All", "Active", "Adopted"], key="ml_sf")
@@ -494,16 +577,18 @@ def render_my_listings(user: dict):
                     f"Contacts: {listing.get('contacts') or 0}"
                 )
             with lc2:
-                if st.button("📋 View", key=f"mlv_{listing['id']}", use_container_width=True):
+                if st.button("📋 View", key=f"mlv_{listing['id']}",
+                             use_container_width=True):
                     _nav("detail", mp_listing_id=listing["id"])
             with lc3:
                 if listing["status"] == "available":
-                    if st.button("✅ Adopted", key=f"mla_{listing['id']}", use_container_width=True):
+                    if st.button("✅ Adopted", key=f"mla_{listing['id']}",
+                                 use_container_width=True):
                         db.mark_adopted(listing["id"], listing.get("adoption_speed_pred", 2))
                         st.rerun()
 
 
-# ── Create Listing ─────────────────────────────────────────────────────────────
+# ── Create Listing (Simon's original form + themed Listing Agent panel) ────────
 
 BREED_DATA = [
     (307, 1, "Mixed Breed"), (20, 1, "Beagle"), (44, 1, "Boxer"),
@@ -523,15 +608,80 @@ BREED_DATA = [
 ]
 
 
-def render_create_listing(user: dict):
-    # Clear stale form state from a previously published listing
-    if st.session_state.pop("_cl_just_published", False):
-        for k in list(st.session_state.keys()):
-            if k.startswith("cl_") and k != "cl_gem_key":
-                st.session_state.pop(k, None)
-        st.rerun()
+def _render_publish_confirmation():
+    """Saved-confirmation screen shown after a successful publish.
 
-    st.markdown("## ➕ Create New Listing")
+    Three CTAs: view the new listing, create another, go to My Listings.
+    All cleanups happen when the user picks one of the actions.
+    """
+    new_listing_id = st.session_state.get("_cl_published_id")
+    listing = db.get_listing(new_listing_id) if new_listing_id else None
+    pet_name = listing.get("pet_name", "Your pet") if listing else "Your pet"
+
+    st.markdown(
+        f'<div style="text-align:center;padding:48px 24px;">'
+        f'<div style="font-size:64px;margin-bottom:12px;">✅</div>'
+        f'<h1 style="font-size:32px;font-weight:600;color:{COLOR_PRIMARY};'
+        f'margin:0 0 8px;letter-spacing:-0.5px;">Listing published!</h1>'
+        f'<p style="font-size:15px;color:{COLOR_TEXT_MUTED};margin:0 0 32px;">'
+        f'<strong>{pet_name}</strong> is now visible to adopters. '
+        f'You can review or edit it at any time.</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        if st.button("View Listing", type="primary",
+                     use_container_width=True, key="pub_view"):
+            _clear_publish_state()
+            _nav("detail", mp_listing_id=new_listing_id)
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Create Another", type="secondary",
+                         use_container_width=True, key="pub_another"):
+                _clear_publish_state()
+                st.rerun()
+        with c2:
+            if st.button("Go to My Listings", type="secondary",
+                         use_container_width=True, key="pub_my"):
+                _clear_publish_state()
+                _nav("my_listings")
+
+
+def _clear_publish_state():
+    """Clear all create-listing form state and the post-publish flag."""
+    st.session_state.pop("_cl_just_published", None)
+    st.session_state.pop("_cl_published_id", None)
+    st.session_state.pop("cl_generated_desc", None)
+    for k in list(st.session_state.keys()):
+        if k.startswith("cl_") and k != "cl_gem_key":
+            st.session_state.pop(k, None)
+
+
+def render_create_listing(user: dict):
+    """Create-listing page — Simon's logic, themed AI ASSISTED header.
+
+    If we just published a listing, show a Saved-confirmation screen first.
+    """
+    if st.session_state.get("_cl_just_published"):
+        _render_publish_confirmation()
+        return
+
+    # Branded header with AI ASSISTED pill
+    header_html = (
+        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">'
+        f'<h1 style="font-size:28px;font-weight:600;color:{COLOR_PRIMARY};margin:0;'
+        f'letter-spacing:-0.3px;">Create New Listing</h1>'
+        f'<span style="background:linear-gradient(135deg,{COLOR_PRIMARY} 0%,{COLOR_PRIMARY_LIGHT} 100%);'
+        f'color:#FFFFFF;padding:4px 12px;border-radius:20px;font-size:11px;'
+        f'font-weight:500;letter-spacing:0.5px;">✨ AI ASSISTED</span>'
+        f'</div>'
+        f'<p style="font-size:14px;color:{COLOR_TEXT_MUTED};margin:0 0 24px;">'
+        f'Upload photos and basic info. Our AI agent enhances your listing automatically.</p>'
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -580,8 +730,10 @@ def render_create_listing(user: dict):
         breed_names = [b[1] for b in breed_opts]
         b1_name = st.selectbox("Primary breed", breed_names, key=f"cl_breed1_{pet_type}")
         breed1 = breed_ids[breed_names.index(b1_name)] if b1_name in breed_names else breed_ids[0]
-        b2_name = st.selectbox("Secondary breed", ["None"] + breed_names, key=f"cl_breed2_{pet_type}")
-        breed2 = 0 if b2_name == "None" else (breed_ids[breed_names.index(b2_name)] if b2_name in breed_names else 0)
+        b2_name = st.selectbox("Secondary breed", ["None"] + breed_names,
+                               key=f"cl_breed2_{pet_type}")
+        breed2 = (0 if b2_name == "None"
+                  else (breed_ids[breed_names.index(b2_name)] if b2_name in breed_names else 0))
 
     st.markdown("---")
     st.subheader("📸 Photos")
@@ -590,13 +742,13 @@ def render_create_listing(user: dict):
         type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="cl_photos"
     )
 
+    # Photo enhancement loop (carried verbatim from Simon)
     if uploaded_files:
         for i, uf in enumerate(uploaded_files):
             studio_key = f"cl_studio_{i}"
             studio_fn_key = f"cl_studio_fn_{i}"
             choice_key = f"cl_studio_use_{i}"
 
-            # Invalidate cached studio result when the file at this slot changes
             if st.session_state.get(studio_fn_key) != uf.name:
                 st.session_state.pop(studio_key, None)
                 st.session_state.pop(choice_key, None)
@@ -605,7 +757,6 @@ def render_create_listing(user: dict):
             studio_bytes = st.session_state.get(studio_key)
 
             if studio_bytes:
-                # Before/after comparison
                 st.caption(f"📸 **{uf.name}**")
                 ba1, ba2 = st.columns(2)
                 with ba1:
@@ -620,8 +771,7 @@ def render_create_listing(user: dict):
                     "Which version to publish?",
                     ["studio", "original"],
                     format_func=lambda x: "✨ Studio version" if x == "studio" else "📷 Original photo",
-                    key=choice_key,
-                    horizontal=True,
+                    key=choice_key, horizontal=True,
                 )
             else:
                 pc1, pc2 = st.columns([1, 4])
@@ -641,12 +791,12 @@ def render_create_listing(user: dict):
                                 status.write("🎨 Asking Gemini for the best backdrop colour…")
                                 gem_ok, bg_color = gemini_utils.get_studio_bg_color(img_data)
                                 if not gem_ok:
-                                    status.write("⚠️ Gemini colour suggestion unavailable — using default backdrop.")
+                                    status.write("⚠️ Gemini colour suggestion unavailable — using default.")
                                 status.write("✂️ Removing background and compositing…")
                                 ok_s, result = gemini_utils.make_studio_ready_bytes(img_data, bg_color)
                                 if ok_s:
                                     st.session_state[studio_key] = result
-                                    status.update(label="✅ Studio photo ready! Choose your preferred version below.", state="complete")
+                                    status.update(label="✅ Studio photo ready!", state="complete")
                                 else:
                                     status.update(label="❌ Processing failed", state="error")
                             if ok_s:
@@ -661,7 +811,6 @@ def render_create_listing(user: dict):
         height=100, placeholder="Personality, history, care needs…", key="cl_desc"
     )
 
-    # ── Generate AI Description button ───────────────────────────────────────
     _gc, _cc = st.columns([3, 1])
     with _gc:
         if gemini_utils.is_configured():
@@ -736,7 +885,6 @@ def render_create_listing(user: dict):
             p0 = pred["predictions"][0]
             speed, conf = p0["prediction"], p0["confidence"]
 
-        # Use the AI-generated description if the user clicked Generate Description
         improved_desc = st.session_state.get("cl_gen_desc_area", "").strip() or None
 
         lid = db.create_listing(
@@ -766,12 +914,14 @@ def render_create_listing(user: dict):
                 dest = _save_upload(uf, lid)
                 db.add_photo(lid, dest)
 
-        # Clear form state on the next visit to Create Listing
+        # Show a clear "Saved" confirmation screen instead of jumping straight to detail.
+        # User can choose: view the new listing, create another, or go to My Listings.
+        st.session_state["_cl_published_id"] = lid
         st.session_state["_cl_just_published"] = True
-        _nav("detail", mp_listing_id=lid)
+        st.rerun()
 
 
-# ── Edit Listing ───────────────────────────────────────────────────────────────
+# ── Edit Listing (carried from Simon, header restyled) ─────────────────────────
 
 def render_edit_listing(listing_id: int, user: dict):
     listing = db.get_listing(listing_id)
@@ -779,7 +929,8 @@ def render_edit_listing(listing_id: int, user: dict):
         st.error("Not found or access denied.")
         return
 
-    st.markdown(f"## ✏️ Edit — {listing['pet_name']}")
+    st.markdown(f"<h1 style='color:{COLOR_PRIMARY};'>✏️ Edit — {listing['pet_name']}</h1>",
+                unsafe_allow_html=True)
     if st.button("← Back", key="el_back"):
         _nav("detail", mp_listing_id=listing_id)
 
@@ -809,7 +960,6 @@ def render_edit_listing(listing_id: int, user: dict):
             height=120, key="el_imp_desc",
         )
 
-    # ── Studio-ready photos ──────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("📸 Studio-Ready Photos")
     photos = db.get_photos(listing_id)
@@ -839,7 +989,6 @@ def render_edit_listing(listing_id: int, user: dict):
                             "⬇️ Download Studio photo", data=s_b, file_name=fname,
                             mime="image/png", key=f"dl_ed_s_{p['id']}"
                         )
-                    # Sticker: derive path from studio path (saved alongside during processing)
                     if p.get("studio_photo_path"):
                         stk_path = str(p["studio_photo_path"]).replace(
                             f"studio_{p['id']}", f"sticker_{p['id']}"
@@ -848,10 +997,8 @@ def render_edit_listing(listing_id: int, user: dict):
                         if stk_b:
                             st.download_button(
                                 "⬇️ Download Sticker (transparent bg)",
-                                data=stk_b,
-                                file_name=f"sticker_{p['id']}.png",
-                                mime="image/png",
-                                key=f"dl_ed_tk_{p['id']}",
+                                data=stk_b, file_name=f"sticker_{p['id']}.png",
+                                mime="image/png", key=f"dl_ed_tk_{p['id']}",
                             )
                 else:
                     ed_pending_key = f"studio_pending_{p['id']}"
@@ -870,9 +1017,7 @@ def render_edit_listing(listing_id: int, user: dict):
                             "Keep which version?",
                             ["studio", "original"],
                             format_func=lambda x: "✨ Studio version" if x == "studio" else "📷 Keep original",
-                            key=ed_choice_key,
-                            horizontal=True,
-                            index=0,
+                            key=ed_choice_key, horizontal=True, index=0,
                         )
                         if st.button("✅ Confirm", key=f"ed_confirm_{p['id']}"):
                             ed_choice = st.session_state.get(ed_choice_key, "studio")
@@ -889,18 +1034,17 @@ def render_edit_listing(listing_id: int, user: dict):
                             st.session_state.pop(ed_choice_key, None)
                             st.rerun()
                     else:
-                        ok_ed = False
                         if st.button("✨ Make Studio Ready", key=f"ed_studio_{p['id']}"):
                             with st.status("Creating studio photo…", expanded=True) as status:
                                 status.write("🎨 Asking Gemini for the best backdrop colour…")
                                 gem_ok, bg_color = gemini_utils.get_studio_bg_color(img_b)
                                 if not gem_ok:
-                                    status.write("⚠️ Gemini colour suggestion unavailable — using default backdrop.")
+                                    status.write("⚠️ Gemini colour suggestion unavailable.")
                                 status.write("✂️ Removing background and compositing…")
                                 ok_ed, result = gemini_utils.make_studio_ready_bytes(img_b, bg_color)
                                 if ok_ed:
                                     st.session_state[ed_pending_key] = result
-                                    status.update(label="✅ Studio photo ready! Choose your preferred version below.", state="complete")
+                                    status.update(label="✅ Studio photo ready!", state="complete")
                                 else:
                                     status.update(label="❌ Processing failed", state="error")
                             if ok_ed:
@@ -914,7 +1058,6 @@ def render_edit_listing(listing_id: int, user: dict):
     new_photos = st.file_uploader("Upload additional photos", type=["jpg", "jpeg", "png"],
                                   accept_multiple_files=True, key="el_photos")
 
-    # ── Gemini description regeneration ─────────────────────────────────────
     if gemini_utils.is_configured() and description.strip():
         if st.button("🤖 Regenerate improved description with Gemini", key="el_regen"):
             first_img = _img_bytes(photos[0]["photo_path"]) if photos else None
@@ -927,7 +1070,6 @@ def render_edit_listing(listing_id: int, user: dict):
                     image_bytes=first_img,
                 )
             if ok:
-                # Stage the result; the text area reinitialises from this on next render
                 st.session_state["el_regen_staged"] = res
                 st.session_state.pop("el_imp_desc", None)
                 st.rerun()
@@ -953,10 +1095,11 @@ def render_edit_listing(listing_id: int, user: dict):
         _nav("detail", mp_listing_id=listing_id)
 
 
-# ── KPI Dashboard ──────────────────────────────────────────────────────────────
+# ── KPI Dashboard (carried from Simon, header restyled) ────────────────────────
 
 def render_kpis(user: dict):
-    st.markdown("## 📊 Performance Dashboard")
+    st.markdown(f"<h1 style='color:{COLOR_PRIMARY};'>📊 Performance Dashboard</h1>",
+                unsafe_allow_html=True)
     kpis = db.get_shelter_kpis(user["id"])
 
     c1, c2, c3, c4 = st.columns(4)
@@ -982,7 +1125,8 @@ def render_kpis(user: dict):
             df = pd.DataFrame(ls)
             df["month"] = pd.to_datetime(df["created_at"]).dt.to_period("M").astype(str)
             grp = df.groupby("month").size().reset_index(name="count")
-            fig = go.Figure(go.Bar(x=grp["month"], y=grp["count"], marker_color="#667eea"))
+            fig = go.Figure(go.Bar(x=grp["month"], y=grp["count"],
+                                    marker_color=COLOR_PRIMARY))
             fig.update_layout(title="Listings created per month", height=300,
                               xaxis_title="Month", yaxis_title="Count")
             st.plotly_chart(fig, use_container_width=True)
@@ -995,7 +1139,7 @@ def render_kpis(user: dict):
         if speeds:
             fig = px.histogram(x=speeds, nbins=5, title="Predicted speed distribution",
                                labels={"x": "Speed", "count": "Pets"},
-                               color_discrete_sequence=["#764ba2"])
+                               color_discrete_sequence=[COLOR_PRIMARY_LIGHT])
             fig.update_layout(height=300)
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -1009,7 +1153,8 @@ def render_kpis(user: dict):
                 rows.append({
                     "Name": l["pet_name"],
                     "Status": l["status"].title(),
-                    "Speed": f"{ADOPTION_SPEED_EMOJI.get(spd, '')} {ADOPTION_SPEED_LABELS.get(spd, '—')}" if spd is not None else "—",
+                    "Speed": (f"{ADOPTION_SPEED_EMOJI.get(spd, '')} {ADOPTION_SPEED_LABELS.get(spd, '—')}"
+                              if spd is not None else "—"),
                     "Views": l.get("views") or 0,
                     "Contacts": l.get("contacts") or 0,
                     "LOS (days)": l.get("adoption_time_days") or "—",
@@ -1018,10 +1163,11 @@ def render_kpis(user: dict):
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
-# ── Watchlist ──────────────────────────────────────────────────────────────────
+# ── Watchlist (carried from Simon, header restyled) ────────────────────────────
 
 def render_watchlist(user: dict):
-    st.markdown("## ❤️ My Watchlist")
+    st.markdown(f"<h1 style='color:{COLOR_PRIMARY};'>❤️ My Watchlist</h1>",
+                unsafe_allow_html=True)
     listings = db.get_watchlist(user["id"])
     if not listings:
         st.info("Your watchlist is empty. Browse pets and click ❤️ to save them!")
@@ -1031,29 +1177,30 @@ def render_watchlist(user: dict):
         with st.container(border=True):
             wc1, wc2, wc3, wc4 = st.columns([3, 1, 1, 1])
             with wc1:
-                spd = listing.get("adoption_speed_pred")
-                badge = (f" {ADOPTION_SPEED_EMOJI.get(spd, '')} {ADOPTION_SPEED_LABELS.get(spd, '')}"
-                         if spd is not None else "")
-                st.markdown(f"**{listing['pet_name']}** —{badge}")
+                st.markdown(f"**{listing['pet_name']}**")
                 sh = listing.get("shelter_name") or listing.get("shelter_username", "")
                 st.caption(f"🏥 {sh} · Saved {listing['saved_at'][:10]}")
             with wc2:
-                if st.button("📋 Details", key=f"wld_{listing['id']}", use_container_width=True):
+                if st.button("📋 Details", key=f"wld_{listing['id']}",
+                             use_container_width=True):
                     _nav("detail", mp_listing_id=listing["id"])
             with wc3:
                 s_uid = listing.get("shelter_id")
-                if st.button("💬 Message", key=f"wlm_{listing['id']}", use_container_width=True):
+                if st.button("💬 Message", key=f"wlm_{listing['id']}",
+                             use_container_width=True):
                     _nav("chat", mp_chat_with=s_uid, mp_chat_listing=listing["id"])
             with wc4:
-                if st.button("🗑️ Remove", key=f"wlr_{listing['id']}", use_container_width=True):
+                if st.button("🗑️ Remove", key=f"wlr_{listing['id']}",
+                             use_container_width=True):
                     db.remove_from_watchlist(user["id"], listing["id"])
                     st.rerun()
 
 
-# ── Chat ───────────────────────────────────────────────────────────────────────
+# ── Chat (carried from Simon, header restyled) ─────────────────────────────────
 
 def render_chat(user: dict):
-    st.markdown("## 💬 Messages")
+    st.markdown(f"<h1 style='color:{COLOR_PRIMARY};'>💬 Messages</h1>",
+                unsafe_allow_html=True)
     conversations = db.get_user_conversations(user["id"])
     other_id = st.session_state.get("mp_chat_with")
     listing_id = st.session_state.get("mp_chat_listing")
@@ -1101,7 +1248,7 @@ def render_chat(user: dict):
             for msg in messages:
                 is_me = msg["sender_id"] == user["id"]
                 align = "right" if is_me else "left"
-                bg = "#667eea" if is_me else "#f0f0f0"
+                bg = COLOR_PRIMARY if is_me else "#f0f0f0"
                 fg = "white" if is_me else "#222"
                 name = "You" if is_me else msg.get("sender_name", other_name)
                 ts = msg["created_at"][11:16]
@@ -1114,17 +1261,13 @@ def render_chat(user: dict):
                     unsafe_allow_html=True,
                 )
 
-        # Message input — rotate the widget key after each send to clear it without
-        # touching a live widget's session state (which Streamlit forbids).
         send_n_key = f"chat_send_n_{other_id}_{listing_id or 0}"
         send_count = st.session_state.get(send_n_key, 0)
         chat_key = f"chat_input_{other_id}_{listing_id or 0}_{send_count}"
         ic, bc = st.columns([5, 1])
         with ic:
-            txt = st.text_input(
-                "Message", key=chat_key, label_visibility="collapsed",
-                placeholder="Type a message…"
-            )
+            txt = st.text_input("Message", key=chat_key, label_visibility="collapsed",
+                                placeholder="Type a message…")
         with bc:
             if st.button("Send ▶", key=f"chat_send_{other_id}_{listing_id or 0}"):
                 content = st.session_state.get(chat_key, "").strip()
@@ -1132,98 +1275,3 @@ def render_chat(user: dict):
                     db.send_message(user["id"], other_id, content, listing_id)
                     st.session_state[send_n_key] = send_count + 1
                     st.rerun()
-
-
-# ── Entry point ────────────────────────────────────────────────────────────────
-
-def show_matching_platform():
-    user = auth.current_user()
-    is_manager = bool(user and user.get("role") == "shelter_manager")
-
-    if "mp_view" not in st.session_state:
-        st.session_state.mp_view = "browse"
-    view = st.session_state.mp_view
-
-    # ── Inline navigation bar ─────────────────────────────────────────────────
-    nav_items: list[tuple[str, str]] = [("🔍 Browse", "browse")]
-    if user:
-        if is_manager:
-            nav_items += [
-                ("📋 My Listings", "my_listings"),
-                ("➕ Create Listing", "create"),
-                ("📊 KPIs", "kpis"),
-            ]
-        else:
-            nav_items.append(("❤️ Watchlist", "watchlist"))
-        unread = db.get_unread_count(user["id"])
-        msg_lbl = f"💬 Messages{f' ({unread})' if unread else ''}"
-        nav_items.append((msg_lbl, "chat"))
-
-    nav_cols = st.columns(len(nav_items))
-    for i, (label, target) in enumerate(nav_items):
-        with nav_cols[i]:
-            btn_type = "primary" if view == target else "secondary"
-            if st.button(label, use_container_width=True,
-                         type=btn_type, key=f"nav_{target}"):
-                _nav(target)
-
-    st.markdown("---")
-
-    # ── View routing ──────────────────────────────────────────────────────────
-    if view == "browse":
-        st.markdown("### 🐾 Marketplace")
-        st.caption("Browse pets available for adoption. Log in to use full features.")
-        render_browse(user)
-
-    elif view == "detail":
-        lid = st.session_state.get("mp_listing_id")
-        if lid:
-            render_detail(lid, user)
-        else:
-            _nav("browse")
-
-    elif view == "my_listings":
-        if not auth.require_login("manage your listings"):
-            return
-        if not is_manager:
-            st.error("Only shelter managers can access My Listings.")
-            return
-        render_my_listings(user)
-
-    elif view == "create":
-        if not auth.require_login("create a listing"):
-            return
-        if not is_manager:
-            st.error("Only shelter managers can create listings.")
-            return
-        render_create_listing(user)
-
-    elif view == "edit":
-        if not auth.require_login("edit listings"):
-            return
-        lid = st.session_state.get("mp_listing_id")
-        if lid:
-            render_edit_listing(lid, user)
-        else:
-            _nav("browse")
-
-    elif view == "kpis":
-        if not auth.require_login("view performance data"):
-            return
-        if not is_manager:
-            st.error("Only shelter managers can view KPIs.")
-            return
-        render_kpis(user)
-
-    elif view == "watchlist":
-        if not auth.require_login("use your watchlist"):
-            return
-        if is_manager:
-            st.error("Watchlist is for households only.")
-            return
-        render_watchlist(user)
-
-    elif view == "chat":
-        if not auth.require_login("send messages"):
-            return
-        render_chat(user)

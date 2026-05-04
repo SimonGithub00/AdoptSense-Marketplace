@@ -43,8 +43,11 @@ AdoptSense supports exactly two user roles:
 Shelter managers represent animal rescue organisations. After registering with a shelter name they can:
 
 - **Create listings** with a full pet form (breed, age, health, fee, photos, description)
+- **Photo upload** — select from device or take a photo directly with a mobile camera
 - **AI description improvement** — Gemini rewrites raw descriptions into a 4–8 sentence,
   warm, adoption-optimised format; optionally informed by the uploaded pet photo
+- **Voice memo** — record a voice description with the microphone; Gemini transcribes it
+  to text and pre-fills the description box
 - **Studio-ready photos** — remove the pet from its background and place it on a professional
   studio backdrop; download as a studio photo or transparent sticker for social media
 - **AI adoption speed prediction** — XGBoost predicts adoption speed (0–4) with confidence
@@ -61,6 +64,10 @@ Households are individuals looking to adopt a pet. They can:
 - **Browse** all available listings (no login required)
 - **Filter** by: pet type, age range, max fee, vaccinated, dewormed, sterilized, health status,
   gender, maturity size, primary color, and which shelter the pet comes from
+- **Smart AI Filter** (login required) — describe your ideal pet in plain language; Gemini
+  ranks all listings by how well they match and re-orders the grid accordingly
+- **Listen to descriptions** — a 🔊 Listen button on each listing detail page uses Gemini TTS
+  to read the pet description aloud
 - **View listing detail pages** with photos, full description, and characteristics
 - **Add to watchlist** (login required)
 - **Message shelter managers** about a specific pet (login required)
@@ -146,14 +153,37 @@ Get a free key at https://aistudio.google.com/app/apikey
 
 ### Description Improvement
 
-Gemini Flash (`gemini-2.0-flash`) rewrites a shelter manager's raw description
-into a 4–8 sentence, warm, adoption-optimised format. Optionally, the first uploaded
-pet photo is included in the prompt for multimodal context.
+`gemini-2.5-flash` rewrites a shelter manager's raw description into a 4–8 sentence, warm,
+adoption-optimised format. Optionally, the first uploaded pet photo is included in the prompt
+for multimodal context.
+
+### Voice Memo (Speech-to-Text)
+
+Shelter managers can record a voice memo with the microphone directly in the listing form.
+`gemini-2.5-flash` transcribes the audio and pre-fills the description text box so it can be
+reviewed and further edited before publishing.
+
+### Text-to-Speech (Listen button)
+
+Every pet detail page shows a 🔊 **Listen** button that reads the description aloud using
+`gemini-2.5-flash-preview-tts`. The audio plays inline — no download required.
+
+### Smart AI Filter
+
+Logged-in households can describe their ideal pet in plain language (e.g. *"a calm small
+vaccinated dog with no adoption fee"*). `gemini-2.5-flash` scores all listings against the
+query and re-orders the browse grid from best match to worst. Regular filters still apply on
+top of the AI ranking.
+
+### Backdrop Colour Selection
+
+`gemini-2.5-flash` analyses each pet photo and suggests the ideal solid studio backdrop colour
+to complement the pet's coat before running background removal.
 
 ### Studio-Ready Photos
 
 1. **Background removal** via `rembg` (U2Net deep learning model — downloads ~170 MB on first use)
-2. **Studio backdrop** added via Pillow (soft grey gradient)
+2. **Studio backdrop** — Gemini-suggested colour composited via Pillow
 3. **Download options:**
    - Studio photo (pet on professional backdrop, PNG)
    - Transparent sticker (pet cut out, PNG with alpha channel) — ready for social media

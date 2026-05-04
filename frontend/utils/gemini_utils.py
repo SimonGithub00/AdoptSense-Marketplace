@@ -457,3 +457,158 @@ def _studio_fallback_pil(image_bytes: bytes, output_path: Path, bg_color: tuple)
         return True, str(output_path)
     except Exception as exc:
         return False, f"Save error: {exc}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Text-to-Speech  (gemini-2.5-flash-preview-tts via REST)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 24000,
+                channels: int = 1, sample_width: int = 2) -> bytes:
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    return buf.getvalue()
+
+
+def text_to_speech(text: str, voice: str = "Aoede") -> tuple[bool, bytes | str]:
+    """Convert text to speech using Gemini 2.5 Flash TTS (REST).
+    Returns (success, wav_bytes) or (False, error_message).
+    """
+    key = _get_api_key()
+    if not key:
+        return False, "Gemini API key not configured."
+    try:
+        import urllib.request
+        import json as _json
+        import base64 as _b64
+
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.5-flash-preview-tts:generateContent?key={key}"
+        )
+        payload = {
+            "contents": [{"parts": [{"text": text}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {"voiceName": voice}
+                    }
+                },
+            },
+        }
+        data = _json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = _json.loads(resp.read())
+
+        audio_b64 = (
+            body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        )
+        pcm_bytes = _b64.b64decode(audio_b64)
+        return True, _pcm_to_wav(pcm_bytes)
+    except Exception as exc:
+        _log(f"TTS error: {exc}")
+        return False, f"TTS error: {exc}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Audio transcription  (gemini-2.5-flash multimodal)
+# ════════════════════════════════════════════════════════════════════════════
+
+def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/wav") -> tuple[bool, str]:
+    """Transcribe audio using Gemini 2.5 Flash multimodal.
+    Returns (success, transcript_text) or (False, error_message).
+    """
+    key = _get_api_key()
+    if not key:
+        return False, "Gemini API key not configured."
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel(model_name="gemini-2.5-flash")
+        parts = [
+            {"mime_type": mime_type, "data": audio_bytes},
+            "Transcribe this audio recording. Output only the transcribed text, no preamble or commentary.",
+        ]
+        response = model.generate_content(parts)
+        return True, response.text.strip()
+    except Exception as exc:
+        _log(f"transcribe_audio error: {exc}")
+        return False, f"Transcription error: {exc}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Smart pet matching  (gemini-2.5-flash ranking)
+# ════════════════════════════════════════════════════════════════════════════
+
+def smart_match_pets(query: str, listings: list[dict]) -> list[int]:
+    """Rank listings by how well they match a natural-language query.
+    Returns listing IDs sorted best-match-first. Falls back to original order on error.
+    """
+    if not listings:
+        return []
+    key = _get_api_key()
+    if not key:
+        return [lst["id"] for lst in listings]
+    try:
+        import google.generativeai as genai
+        import json as _json
+        import re as _re
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel(model_name="gemini-2.5-flash")
+
+        summaries = []
+        for lst in listings:
+            type_str = {1: "Dog", 2: "Cat"}.get(lst.get("type", 0), "Other")
+            gender_str = {1: "Male", 2: "Female", 3: "Mixed"}.get(lst.get("gender", 1), "")
+            age_m = lst.get("age", 0) or 0
+            age_str = f"{int(age_m / 12)}y" if age_m >= 12 else f"{int(age_m)}m"
+            size_str = {1: "Small", 2: "Medium", 3: "Large", 4: "XL"}.get(
+                lst.get("maturity_size", 2), "Medium"
+            )
+            vacc_str = {1: "vaccinated", 2: "not vaccinated"}.get(lst.get("vaccinated", 3), "")
+            ster_str = {1: "sterilized", 2: "not sterilized"}.get(lst.get("sterilized", 3), "")
+            hlth_str = {1: "healthy", 2: "minor injury", 3: "serious injury"}.get(
+                lst.get("health", 1), "healthy"
+            )
+            fee_str = "free" if (lst.get("fee") or 0) == 0 else f"fee {lst.get('fee')}"
+            desc = (lst.get("description_improved") or lst.get("description") or "")[:200]
+            name = lst.get("pet_name") or "Unknown"
+            summaries.append(
+                f'ID:{lst["id"]} | {name} | {type_str} {gender_str} {age_str} {size_str} '
+                f'| {vacc_str} {ster_str} {hlth_str} | {fee_str} | {desc}'
+            )
+
+        prompt = (
+            "You are a pet adoption matching assistant. "
+            "Rank the following pet listings by how well they match the user's query.\n\n"
+            f'User query: "{query}"\n\n'
+            f"Pet listings:\n" + "\n".join(summaries) + "\n\n"
+            "Return ONLY a JSON array of listing IDs in order from best to worst match. "
+            "Example: [42, 17, 5]"
+        )
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        m = _re.search(r'\[[\d,\s]+\]', text)
+        if m:
+            ranked_ids = _json.loads(m.group())
+            valid_ids = {lst["id"] for lst in listings}
+            ranked = [i for i in ranked_ids if i in valid_ids]
+            ranked_set = set(ranked)
+            for lst in listings:
+                if lst["id"] not in ranked_set:
+                    ranked.append(lst["id"])
+            return ranked
+    except Exception as exc:
+        _log(f"smart_match_pets error: {exc}")
+    return [lst["id"] for lst in listings]

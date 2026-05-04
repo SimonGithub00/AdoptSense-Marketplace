@@ -196,6 +196,48 @@ def _render_filters(is_manager: bool) -> dict:
 def render_browse(user: dict | None):
     """Adopter browse page — themed pet card grid + filters."""
     is_manager = bool(user and user.get("role") == "shelter_manager")
+    is_household = bool(user and user.get("role") == "household")
+
+    # ── Smart AI Filter (households only) ─────────────────────────────────────
+    if is_household and gemini_utils.is_configured():
+        # Run ranking outside the expander so the spinner renders above the fold
+        if st.session_state.get("_smart_filter_text") and "_smart_filter_ids" not in st.session_state:
+            _all_for_ai = db.get_listings({})
+            with st.spinner("🔮 Finding best matches with AI…"):
+                _ranked = gemini_utils.smart_match_pets(
+                    st.session_state["_smart_filter_text"], _all_for_ai
+                )
+            st.session_state["_smart_filter_ids"] = _ranked
+            st.rerun()
+
+        with st.expander(
+            "🔮 Smart AI Filter — describe your ideal pet",
+            expanded=bool(st.session_state.get("_smart_filter_text")),
+        ):
+            _smart_q = st.text_input(
+                "Describe what you're looking for",
+                placeholder="e.g. a calm small dog, vaccinated, free adoption fee",
+                key="smart_filter_query",
+                label_visibility="collapsed",
+            )
+            _sq_run, _sq_clear = st.columns([2, 1])
+            with _sq_run:
+                if st.button("🔍 Find best matches", key="smart_filter_btn", use_container_width=True):
+                    if _smart_q.strip():
+                        st.session_state["_smart_filter_text"] = _smart_q.strip()
+                        st.session_state.pop("_smart_filter_ids", None)
+                        st.rerun()
+                    else:
+                        st.warning("Please describe your ideal pet first.")
+            with _sq_clear:
+                if st.session_state.get("_smart_filter_text"):
+                    if st.button("✕ Clear", key="smart_filter_clear", use_container_width=True):
+                        st.session_state.pop("_smart_filter_text", None)
+                        st.session_state.pop("_smart_filter_ids", None)
+                        st.rerun()
+            if st.session_state.get("_smart_filter_text"):
+                st.caption(f'Matching: "{st.session_state["_smart_filter_text"]}"')
+
     filters = _render_filters(is_manager=is_manager)
     listings = db.get_listings(filters)
 
@@ -203,7 +245,18 @@ def render_browse(user: dict | None):
         st.info("No listings match your filters.")
         return
 
-    st.caption(f"{len(listings)} pets available")
+    # Apply AI ranking if active
+    if is_household and "_smart_filter_ids" in st.session_state:
+        _ranked_ids = st.session_state["_smart_filter_ids"]
+        _id_map = {l["id"]: l for l in listings}
+        listings = [_id_map[i] for i in _ranked_ids if i in _id_map]
+        _ranked_set = set(_ranked_ids)
+        for _l in _id_map.values():
+            if _l["id"] not in _ranked_set:
+                listings.append(_l)
+        st.caption(f"🔮 AI-ranked — {len(listings)} pets sorted by best match")
+    else:
+        st.caption(f"{len(listings)} pets available")
 
     # 3-column grid of branded pet cards
     cols = st.columns(3, gap="medium")
@@ -303,9 +356,24 @@ def render_detail(listing_id: int, user: dict | None):
 
     # ── Description ──────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown(f"<h3 style='color:{COLOR_PRIMARY};font-weight:600;'>About {pet_name}</h3>",
-                unsafe_allow_html=True)
     desc = listing.get("description_improved") or listing.get("description") or ""
+    _d_hdr_col, _d_tts_col = st.columns([4, 1])
+    with _d_hdr_col:
+        st.markdown(f"<h3 style='color:{COLOR_PRIMARY};font-weight:600;'>About {pet_name}</h3>",
+                    unsafe_allow_html=True)
+    with _d_tts_col:
+        if desc and gemini_utils.is_configured():
+            _tts_key = f"tts_audio_{listing_id}"
+            if st.button("🔊 Listen", key=f"tts_btn_{listing_id}", use_container_width=True):
+                with st.spinner("Generating audio…"):
+                    _tts_ok, _tts_res = gemini_utils.text_to_speech(desc)
+                if _tts_ok:
+                    st.session_state[_tts_key] = _tts_res
+                else:
+                    st.warning(f"Audio unavailable: {_tts_res}")
+                st.rerun()
+            if st.session_state.get(_tts_key):
+                st.audio(st.session_state[_tts_key], format="audio/wav")
     if listing.get("description_improved") and listing.get("description"):
         with st.expander("Show original description"):
             st.caption(listing["description"])
@@ -761,10 +829,20 @@ def render_create_listing(user: dict):
 
     st.markdown("---")
     st.subheader("📸 Photos")
-    uploaded_files = st.file_uploader(
-        "Upload pet photos (JPG/PNG)",
-        type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="cl_photos"
-    )
+    _ptab_file, _ptab_cam = st.tabs(["📁 Select from device", "📷 Take photo"])
+    with _ptab_file:
+        uploaded_files = st.file_uploader(
+            "Upload pet photos (JPG/PNG)",
+            type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="cl_photos"
+        )
+    with _ptab_cam:
+        _cam_photo = st.camera_input("Take a photo of your pet", key="cl_camera_photo")
+        if _cam_photo:
+            st.success("📸 Photo captured — it will appear as the first photo in your listing.")
+    # Camera capture becomes the cover photo (index 0); uploaded files follow
+    all_files = list(uploaded_files or [])
+    if _cam_photo:
+        all_files = [_cam_photo] + all_files
 
     # Photo enhancement loop.
     # Two AI paths per upload: Quick Studio (local rembg) and AI Studio
@@ -775,8 +853,8 @@ def render_create_listing(user: dict):
     # cached bytes. Calling uf.read() multiple times (even with seek(0)
     # between calls) is unreliable across Streamlit reruns on some
     # platforms — manifests as "OSError: broken data stream" from PIL.
-    if uploaded_files:
-        for i, uf in enumerate(uploaded_files):
+    if all_files:
+        for i, uf in enumerate(all_files):
             bokeh_key = f"cl_bokeh_{i}"         # Bokeh (sharp pet on blurred BG) bytes
             studio_key = f"cl_studio_{i}"       # Studio (sharp pet on backdrop) bytes
             studio_fn_key = f"cl_studio_fn_{i}"
@@ -915,8 +993,39 @@ def render_create_listing(user: dict):
 
     st.markdown("---")
     st.subheader("📝 Description")
+
+    # Voice memo → transcription → pre-fill description box
+    if gemini_utils.is_configured():
+        _voice_memo = st.audio_input("🎙️ Record a voice memo (optional)", key="cl_voice_memo")
+        if _voice_memo is not None:
+            if st.button("📝 Transcribe memo", key="cl_transcribe_btn"):
+                with st.spinner("Transcribing with Gemini…"):
+                    _t_ok, _transcript = gemini_utils.transcribe_audio(
+                        _voice_memo.read(), _voice_memo.type or "audio/wav"
+                    )
+                if _t_ok:
+                    st.session_state["_cl_voice_transcript"] = _transcript
+                    st.rerun()
+                else:
+                    st.warning(f"Transcription failed: {_transcript}")
+    if st.session_state.get("_cl_voice_transcript"):
+        st.info("📝 Transcript ready — review and click **Use** to pre-fill the description.")
+        st.caption(st.session_state["_cl_voice_transcript"])
+        _vc1, _vc2 = st.columns(2)
+        with _vc1:
+            if st.button("✅ Use as description", key="cl_use_transcript_btn", use_container_width=True):
+                st.session_state.pop("cl_desc", None)
+                st.session_state["_cl_desc_prefill"] = st.session_state.pop("_cl_voice_transcript")
+                st.rerun()
+        with _vc2:
+            if st.button("✕ Discard", key="cl_discard_transcript_btn", use_container_width=True):
+                st.session_state.pop("_cl_voice_transcript", None)
+                st.rerun()
+
+    _desc_prefill = st.session_state.pop("_cl_desc_prefill", "")
     description = st.text_area(
         "Raw description (optional — used as context for AI generation)",
+        value=_desc_prefill,
         height=100, placeholder="Personality, history, care needs…", key="cl_desc"
     )
 
@@ -929,9 +1038,13 @@ def render_create_listing(user: dict):
                     f"{TYPE_MAP.get(pet_type, 'Pet')} named {pet_name or 'this pet'}"
                 )
                 first_bytes = None
-                if uploaded_files:
-                    first_bytes = uploaded_files[0].read()
-                    uploaded_files[0].seek(0)
+                if all_files:
+                    try:
+                        all_files[0].seek(0)
+                        first_bytes = all_files[0].read()
+                        all_files[0].seek(0)
+                    except Exception:
+                        first_bytes = None
                 with st.spinner("Generating description with Gemini AI…"):
                     ok, result = gemini_utils.improve_description(
                         base,
@@ -983,7 +1096,7 @@ def render_create_listing(user: dict):
             "MaturitySize": maturity_size, "FurLength": fur_length,
             "Vaccinated": vaccinated, "Dewormed": dewormed, "Sterilized": sterilized,
             "Health": health, "Quantity": quantity, "Fee": fee, "State": state,
-            "PhotoAmt": len(uploaded_files), "VideoAmt": video_amt,
+            "PhotoAmt": len(all_files), "VideoAmt": video_amt,
             "Description": description,
         }])
 
@@ -1008,7 +1121,7 @@ def render_create_listing(user: dict):
             adoption_speed_pred=speed, adoption_speed_confidence=conf,
         )
 
-        for i, uf in enumerate(uploaded_files):
+        for i, uf in enumerate(all_files):
             choice = st.session_state.get(f"cl_studio_use_{i}", "original")
             bokeh_b = st.session_state.get(f"cl_bokeh_{i}")
             studio_b = st.session_state.get(f"cl_studio_{i}")

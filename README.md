@@ -567,7 +567,7 @@ On first launch the app:
 
 ## License
 
-MIT License — see the LICENSE file for details.
+See the LICENSE file for details.
 
 ---
 

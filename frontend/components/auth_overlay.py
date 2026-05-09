@@ -5,10 +5,23 @@ Renders inside a centered card when st.session_state.show_auth is set to
 "login" or "register". Uses Simon's `frontend.utils.auth` module for the
 actual logic — only the visual presentation is new.
 """
+import json
+from pathlib import Path
+
 import streamlit as st
 
 from frontend.styles import COLOR_PRIMARY, COLOR_BORDER, COLOR_TEXT_MUTED
-from frontend.utils import auth
+from frontend.utils import auth, db
+
+_LOCATIONS_PATH = Path(__file__).parent.parent / "assets" / "shelter_locations.json"
+
+
+@st.cache_data
+def _load_reg_locations() -> dict:
+    try:
+        return json.loads(_LOCATIONS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"countries": [], "cities_by_country": {}}
 
 
 def is_overlay_active() -> bool:
@@ -21,7 +34,6 @@ def render_auth_overlay():
     if mode not in ("login", "register"):
         return False
 
-    # Center the form in the middle 50% of the page
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
         with st.container(border=True):
@@ -63,14 +75,15 @@ def _render_login_form():
         st.rerun()
 
     if submitted:
-        ok, msg = auth.login(username, password)
-        if ok:
+        user = auth.verify_credentials(username, password)
+        if user is None:
+            st.error("Invalid username or password.")
+        else:
+            st.session_state.user = user
             st.session_state.pop("show_auth", None)
             st.session_state["_just_logged_in"] = True
-            st.success(msg)
+            st.success(f"Welcome back, {user['username']}!")
             st.rerun()
-        else:
-            st.error(msg)
 
     st.markdown(
         f'<div style="text-align:center;margin-top:12px;font-size:13px;'
@@ -88,20 +101,53 @@ def _render_register_form():
         "Join AdoptSense as an adopter or a shelter.",
     )
 
+    locs = _load_reg_locations()
+    countries = locs.get("countries", [])
+    cities_by_country = locs.get("cities_by_country", {})
+
+    # Role selector OUTSIDE the form so changing it triggers a rerun and
+    # shelter-specific fields appear/disappear without needing to submit first.
+    role = st.selectbox(
+        "I am a…",
+        options=["household", "shelter_manager"],
+        format_func=lambda x: ("🏠 Adopter (household)" if x == "household"
+                               else "🏥 Shelter Manager"),
+        key="reg_role",
+    )
+
     with st.form("register_form", clear_on_submit=False):
         username = st.text_input("Username", key="reg_username")
         email = st.text_input("Email", key="reg_email")
-        role = st.selectbox(
-            "I am a…",
-            options=["household", "shelter_manager"],
-            format_func=lambda x: ("🏠 Adopter (household)" if x == "household"
-                                   else "🏥 Shelter Manager"),
-            key="reg_role",
-        )
         shelter_name = ""
+        reg_phone = ""
+        reg_country = None
+        reg_city = None
+        reg_postal = None
+        reg_shelter_address = ""
         if role == "shelter_manager":
             shelter_name = st.text_input(
-                "Shelter / Organisation name", key="reg_shelter_name"
+                "Shelter / Organisation name *", key="reg_shelter_name"
+            )
+            reg_phone = st.text_input(
+                "Phone number *", key="reg_phone", placeholder="+351 912 345 678"
+            )
+            st.markdown("**Shelter location \\***")
+            _reg_country_opts = ["— select —"] + countries
+            _rc = st.selectbox("Country *", _reg_country_opts, key="reg_country")
+            _reg_city_list = [c["city"] for c in cities_by_country.get(_rc, [])] if _rc != "— select —" else []
+            _rci = st.selectbox("City *", ["— select —"] + _reg_city_list, key="reg_city",
+                                disabled=(_rc == "— select —"))
+            _reg_postal_list = []
+            if _rci and _rci != "— select —":
+                for _e in cities_by_country.get(_rc, []):
+                    if _e["city"] == _rci:
+                        _reg_postal_list = _e.get("postal_codes", [])
+                        break
+            _rcp = st.selectbox("Postal code", ["— any —"] + _reg_postal_list, key="reg_postal",
+                                disabled=(_rci == "— select —"))
+            reg_shelter_address = st.text_input(
+                "Street address", key="reg_shelter_address",
+                placeholder="Rua da Esperança 12"
             )
         password = st.text_input(
             "Password (min 6 chars)", type="password", key="reg_password"
@@ -125,13 +171,35 @@ def _render_register_form():
     if submitted:
         if password != password2:
             st.error("Passwords do not match.")
+        elif role == "shelter_manager" and not shelter_name.strip():
+            st.error("Shelter name is required.")
+        elif role == "shelter_manager" and not reg_phone.strip():
+            st.error("Phone number is required for shelter managers.")
+        elif role == "shelter_manager" and st.session_state.get("reg_country", "— select —") == "— select —":
+            st.error("Please select your country.")
+        elif role == "shelter_manager" and st.session_state.get("reg_city", "— select —") == "— select —":
+            st.error("Please select your city.")
         else:
             ok, msg = auth.register(
                 username, email, password, role,
                 shelter_name=shelter_name or None,
             )
             if ok:
-                # Auto-login after successful registration
+                # Store extra shelter manager fields
+                if role == "shelter_manager":
+                    uid = db.get_user_by_username(username.strip())
+                    if uid:
+                        _rc_val = st.session_state.get("reg_country")
+                        _rci_val = st.session_state.get("reg_city")
+                        _rcp_val = st.session_state.get("reg_postal")
+                        db.update_user(
+                            uid["id"],
+                            phone=reg_phone.strip(),
+                            country=_rc_val if _rc_val != "— select —" else None,
+                            city=_rci_val if _rci_val != "— select —" else None,
+                            postal_code=_rcp_val if _rcp_val != "— any —" else None,
+                            shelter_address=reg_shelter_address.strip() or None,
+                        )
                 auth.login(username, password)
                 st.session_state.pop("show_auth", None)
                 st.session_state["_just_logged_in"] = True

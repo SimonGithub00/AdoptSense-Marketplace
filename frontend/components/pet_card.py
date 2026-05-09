@@ -44,7 +44,8 @@ def _photo_bytes(listing_id: int) -> bytes | None:
     return None
 
 
-def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "pc"):
+def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "pc",
+                    compatibility_pct: float | None = None):
     """Render a single pet card with a working 'View details' button.
 
     Layout uses st.container(border=True) for the outer card and st.image
@@ -88,6 +89,22 @@ def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "
                 f'<span style="background:{color};color:#FFFFFF;padding:2px 10px;'
                 f'border-radius:4px;font-size:11px;font-weight:500;'
                 f'letter-spacing:0.3px;">{label}</span>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Compatibility badge (smart filter) ─────────────────────────────
+        if compatibility_pct is not None:
+            pct = int(round(compatibility_pct))
+            if pct >= 75:
+                bg, fg = "#1E7A4A", "#FFFFFF"
+            elif pct >= 50:
+                bg, fg = "#2A7AB8", "#FFFFFF"
+            else:
+                bg, fg = "#6B7280", "#FFFFFF"
+            st.markdown(
+                f'<span style="background:{bg};color:{fg};padding:2px 10px;'
+                f'border-radius:4px;font-size:11px;font-weight:500;'
+                f'letter-spacing:0.3px;">{pct}% match</span>',
                 unsafe_allow_html=True,
             )
 

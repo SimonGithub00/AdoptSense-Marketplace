@@ -7,7 +7,9 @@
       "Bash(mkdir -p \"c:\\\\Users\\\\simon\\\\Desktop\\\\AdoptSense-Pet-Adoption-Prediction\\\\frontend\\\\assets\\\\studio\")",
       "Bash(mkdir -p \"c:\\\\Users\\\\simon\\\\Desktop\\\\AdoptSense-Pet-Adoption-Prediction\\\\frontend\\\\assets\\\\seed_photos\")",
       "Bash(pip install *)",
-      "Bash(pip show *)"
+      "Bash(pip show *)",
+      "Bash(.venv\\\\Scripts\\\\pip install *)",
+      "Bash(python -m pip install \"google-genai>=1.0.0\")"
     ]
   }
 }

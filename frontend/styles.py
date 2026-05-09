@@ -1,9 +1,11 @@
 """
 AdoptSense — central styling and shared visual constants.
-All brand colors, the logo SVG, and the global CSS live here.
+All brand colors, the actual logo, and the global CSS live here.
 """
-import streamlit as st
+import base64
+from pathlib import Path
 
+import streamlit as st
 
 # Brand palette
 COLOR_PRIMARY = "#1E2761"        # Navy
@@ -25,9 +27,46 @@ SPEED_COLORS = {
     4: "#F44336",
 }
 
+_LOGO_DIR = Path(__file__).parent / "assets" / "logo"
+_LOGO_PNG = _LOGO_DIR / "AdoptSense Logo_best quality_png.png"
+_LOGO_SVG = _LOGO_DIR / "AdoptSense Logo_best quality_svg.svg"
 
-def logo_svg(size: int = 40) -> str:
-    """Return the AdoptSense heart-paw logo as an inline SVG string."""
+
+@st.cache_data
+def logo_png_b64() -> str | None:
+    """Return the logo PNG as a base64 data-URI string, or None."""
+    try:
+        data = _LOGO_PNG.read_bytes()
+        return base64.b64encode(data).decode("ascii")
+    except Exception:
+        return None
+
+
+@st.cache_data
+def logo_svg_content() -> str | None:
+    """Return raw SVG content of the logo, or None."""
+    try:
+        return _LOGO_SVG.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
+def logo_img_tag(size: int = 40, css_class: str = "") -> str:
+    """Return an <img> or inline <svg> tag for the logo, sized in px."""
+    b64 = logo_png_b64()
+    if b64:
+        cls = f' class="{css_class}"' if css_class else ""
+        return (
+            f'<img src="data:image/png;base64,{b64}" '
+            f'width="{size}" height="{size}" '
+            f'style="object-fit:contain;display:block;flex-shrink:0;"{cls} alt="AdoptSense logo"/>'
+        )
+    # Fallback: inline SVG path drawing
+    return logo_svg_fallback(size)
+
+
+def logo_svg_fallback(size: int = 40) -> str:
+    """Minimal inline SVG fallback when logo file is unavailable."""
     return (
         f'<svg width="{size}" height="{size}" viewBox="0 0 32 32" '
         f'xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0;">'
@@ -42,6 +81,11 @@ def logo_svg(size: int = 40) -> str:
     )
 
 
+def logo_svg(size: int = 40) -> str:
+    """Return the best available logo as an HTML string (PNG preferred)."""
+    return logo_img_tag(size)
+
+
 def inject_global_css():
     """Inject brand CSS. Call once near the top of app.py."""
     css = f"""
@@ -54,7 +98,7 @@ def inject_global_css():
         max-width: 1200px;
     }}
 
-    /* Hide Streamlit chrome we don't want to show */
+    /* Hide Streamlit chrome we don't want */
     #MainMenu {{ visibility: hidden; }}
     footer {{ visibility: hidden; }}
     header[data-testid="stHeader"] {{ background: transparent; }}
@@ -109,7 +153,7 @@ def inject_global_css():
         border-radius: 8px !important;
     }}
 
-    /* Tabs (used inside marketplace sub-views) */
+    /* Tabs */
     .stTabs [data-baseweb="tab-list"] {{
         gap: 24px;
         border-bottom: 1px solid {COLOR_BORDER};
@@ -135,6 +179,24 @@ def inject_global_css():
         border-radius: 10px;
         border: 1px dashed {COLOR_BORDER};
         background: {COLOR_BG_SOFT};
+    }}
+
+    /* Publish success animation */
+    @keyframes as_success_pop {{
+        0%   {{ transform: scale(0.5); opacity: 0; }}
+        60%  {{ transform: scale(1.15); opacity: 1; }}
+        80%  {{ transform: scale(0.95); }}
+        100% {{ transform: scale(1); }}
+    }}
+    .as-success-icon {{
+        animation: as_success_pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+        display: inline-block;
+    }}
+
+    /* Confetti dots */
+    @keyframes as_confetti_fall {{
+        0%   {{ transform: translateY(-20px) rotate(0deg); opacity: 1; }}
+        100% {{ transform: translateY(120px) rotate(360deg); opacity: 0; }}
     }}
     </style>
     """

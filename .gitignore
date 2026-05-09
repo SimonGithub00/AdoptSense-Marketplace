@@ -118,6 +118,6 @@ secrets.toml
 # AdoptSense runtime artifacts
 # ===============================
 #frontend/adoptsense.db
-frontend/assets/uploads/
-frontend/assets/studio/
-frontend/assets/seed_photos/
+#frontend/assets/uploads/
+#frontend/assets/studio/
+#frontend/assets/seed_photos/

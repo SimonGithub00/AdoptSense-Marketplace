@@ -1,6 +1,6 @@
 """
 SQLite database layer for AdoptSense.
-All persistence for users, listings, photos, messages, watchlist, and KPIs.
+All persistence for users, listings, photos, messages, watchlist, KPIs, and surveys.
 """
 import sqlite3
 from datetime import datetime
@@ -25,9 +25,55 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _add_column_if_missing(conn, table: str, column: str, col_type: str, default: str = ""):
+    """Safely add a column to an existing table if it doesn't already exist."""
+    try:
+        existing = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if column not in existing:
+            default_clause = f" DEFAULT {default}" if default else ""
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}{default_clause}")
+    except Exception:
+        pass
+
+
+def _ensure_admin_role_supported(conn):
+    """Patch the users table CHECK constraint to include 'admin' if needed.
+
+    Uses PRAGMA writable_schema to edit the constraint string in-place —
+    no data is moved, so existing users are never lost.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'"
+    ).fetchone()
+    if not row:
+        return  # table not yet created — CREATE TABLE below will include 'admin'
+    old_sql = row[0] or ""
+    if "'admin'" in old_sql:
+        return  # already supports admin
+
+    new_sql = old_sql.replace(
+        "CHECK (role IN ('shelter_manager', 'household'))",
+        "CHECK (role IN ('shelter_manager', 'household', 'admin'))",
+    )
+    if new_sql == old_sql:
+        return  # constraint text not found verbatim, nothing to patch
+
+    try:
+        conn.execute("PRAGMA writable_schema = ON")
+        conn.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'users'",
+            (new_sql,),
+        )
+        conn.execute("PRAGMA writable_schema = OFF")
+    except Exception:
+        conn.execute("PRAGMA writable_schema = OFF")
+
+
 def init_db():
     _ensure_dirs()
     conn = get_conn()
+    # Must run before the executescript (which does an implicit COMMIT)
+    _ensure_admin_role_supported(conn)
     with conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -35,7 +81,7 @@ def init_db():
                 username TEXT UNIQUE NOT NULL,
                 email TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
-                role TEXT NOT NULL CHECK (role IN ('shelter_manager', 'household')),
+                role TEXT NOT NULL CHECK (role IN ('shelter_manager', 'household', 'admin')),
                 shelter_name TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -116,7 +162,70 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (listing_id) REFERENCES listings(id)
             );
+
+            CREATE TABLE IF NOT EXISTS adoption_surveys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                satisfaction_score INTEGER NOT NULL CHECK (satisfaction_score BETWEEN 1 AND 5),
+                comment TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (listing_id) REFERENCES listings(id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE(listing_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS listing_videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id INTEGER NOT NULL,
+                video_path TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS user_surveys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                threshold INTEGER NOT NULL,
+                score INTEGER,
+                comment TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, threshold),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
         """)
+
+        # ── Safe migrations — add new columns to existing databases ──────────
+
+        # User engagement tracking
+        _add_column_if_missing(conn, "users", "action_count", "INTEGER", "0")
+
+        # User profile extensions
+        _add_column_if_missing(conn, "users", "phone", "TEXT")
+        _add_column_if_missing(conn, "users", "bio", "TEXT")
+        _add_column_if_missing(conn, "users", "location", "TEXT")
+        _add_column_if_missing(conn, "users", "website", "TEXT")
+        _add_column_if_missing(conn, "users", "shelter_address", "TEXT")
+        _add_column_if_missing(conn, "users", "shelter_description", "TEXT")
+        _add_column_if_missing(conn, "users", "country", "TEXT")
+        _add_column_if_missing(conn, "users", "city", "TEXT")
+        _add_column_if_missing(conn, "users", "postal_code", "TEXT")
+
+        # Listing enrichment fields for smart matching
+        _add_column_if_missing(conn, "listings", "temperament_tags", "TEXT")
+        _add_column_if_missing(conn, "listings", "energy_level", "TEXT")
+        _add_column_if_missing(conn, "listings", "housing_fit", "TEXT")
+        _add_column_if_missing(conn, "listings", "good_with_children", "INTEGER")
+        _add_column_if_missing(conn, "listings", "good_with_cats", "INTEGER")
+        _add_column_if_missing(conn, "listings", "good_with_dogs", "INTEGER")
+        _add_column_if_missing(conn, "listings", "experience_required", "TEXT")
+        _add_column_if_missing(conn, "listings", "special_needs", "TEXT")
+
+        # Location fields for listings (lat/lon removed — map uses _CITY_COORDS dict)
+        _add_column_if_missing(conn, "listings", "country", "TEXT", "'Malaysia'")
+        _add_column_if_missing(conn, "listings", "city", "TEXT")
+        _add_column_if_missing(conn, "listings", "postal_code", "TEXT")
+
     conn.close()
 
 
@@ -153,10 +262,28 @@ def get_user_by_id(user_id: int) -> Optional[Dict]:
     return dict(row) if row else None
 
 
+def update_user(user_id: int, **kwargs: Any) -> bool:
+    """Update user profile fields. Only allows safe fields."""
+    ALLOWED = {"phone", "bio", "location", "website", "shelter_name",
+                "shelter_address", "shelter_description", "email",
+                "country", "city", "postal_code", "password_hash"}
+    safe = {k: v for k, v in kwargs.items() if k in ALLOWED}
+    if not safe:
+        return False
+    conn = get_conn()
+    set_clause = ", ".join([f"{k} = ?" for k in safe])
+    values = list(safe.values()) + [user_id]
+    with conn:
+        conn.execute(f"UPDATE users SET {set_clause} WHERE id = ?", values)
+    conn.close()
+    return True
+
+
 def get_all_shelters() -> List[Dict]:
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, username, shelter_name FROM users WHERE role = 'shelter_manager'"
+        "SELECT id, username, shelter_name, shelter_address, location, "
+        "country, city, postal_code, phone FROM users WHERE role = 'shelter_manager'"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -183,7 +310,8 @@ def create_listing(shelter_id: int, pet_name: str, pet_type: int,
 def get_listing(listing_id: int) -> Optional[Dict]:
     conn = get_conn()
     row = conn.execute(
-        """SELECT l.*, u.shelter_name, u.username AS shelter_username, u.id AS shelter_user_id
+        """SELECT l.*, u.shelter_name, u.username AS shelter_username, u.id AS shelter_user_id,
+                  u.shelter_address, u.location AS shelter_location
            FROM listings l JOIN users u ON l.shelter_id = u.id
            WHERE l.id = ?""",
         (listing_id,),
@@ -226,6 +354,12 @@ def get_listings(filters: Optional[Dict] = None, limit: int = 200) -> List[Dict]
             q += " AND l.shelter_id = ?"; params.append(filters["shelter_id"])
         if filters.get("max_speed") is not None:
             q += " AND l.adoption_speed_pred <= ?"; params.append(filters["max_speed"])
+        if filters.get("country"):
+            q += " AND l.country = ?"; params.append(filters["country"])
+        if filters.get("city"):
+            q += " AND l.city LIKE ?"; params.append(f"%{filters['city']}%")
+        if filters.get("postal_code"):
+            q += " AND l.postal_code LIKE ?"; params.append(f"%{filters['postal_code']}%")
 
     q += " ORDER BY l.created_at DESC LIMIT ?"
     params.append(limit)
@@ -262,6 +396,7 @@ def delete_listing(listing_id: int) -> bool:
     conn = get_conn()
     with conn:
         conn.execute("DELETE FROM listing_photos WHERE listing_id = ?", (listing_id,))
+        conn.execute("DELETE FROM listing_videos WHERE listing_id = ?", (listing_id,))
         conn.execute("DELETE FROM listing_kpis WHERE listing_id = ?", (listing_id,))
         conn.execute("DELETE FROM watchlist WHERE listing_id = ?", (listing_id,))
         conn.execute("DELETE FROM messages WHERE listing_id = ?", (listing_id,))
@@ -316,6 +451,27 @@ def get_photos(listing_id: int) -> List[Dict]:
     return [dict(r) for r in rows]
 
 
+def add_video(listing_id: int, video_path: str) -> int:
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO listing_videos (listing_id, video_path) VALUES (?, ?)",
+            (listing_id, video_path),
+        )
+        vid = cur.lastrowid
+    conn.close()
+    return vid
+
+
+def get_videos(listing_id: int) -> List[Dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM listing_videos WHERE listing_id = ? ORDER BY id", (listing_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def update_photo_studio(photo_id: int, studio_path: str) -> bool:
     conn = get_conn()
     with conn:
@@ -360,31 +516,88 @@ def get_listing_kpi(listing_id: int) -> Optional[Dict]:
 def get_shelter_kpis(shelter_id: int) -> Dict:
     conn = get_conn()
     rows = conn.execute(
-        """SELECT l.*, k.views, k.contacts, k.adoption_time_days
+        """SELECT l.*, k.views, k.contacts, k.adoption_time_days, k.last_view_at
            FROM listings l LEFT JOIN listing_kpis k ON l.id = k.listing_id
            WHERE l.shelter_id = ?""",
         (shelter_id,),
     ).fetchall()
     conn.close()
     ls = [dict(r) for r in rows]
+
     total = len(ls)
-    active = sum(1 for r in ls if r["status"] == "available")
-    adopted = sum(1 for r in ls if r["status"] == "adopted")
+    active = [r for r in ls if r["status"] == "available"]
+    adopted = [r for r in ls if r["status"] == "adopted"]
+    dogs = [r for r in ls if r.get("type") == 1]
+    cats = [r for r in ls if r.get("type") == 2]
+
     speeds = [r["adoption_speed_actual"] for r in ls if r.get("adoption_speed_actual") is not None]
     los_vals = [r["adoption_time_days"] for r in ls if r.get("adoption_time_days") is not None]
     total_views = sum(r.get("views") or 0 for r in ls)
     total_contacts = sum(r.get("contacts") or 0 for r in ls)
+    avg_fee_vals = [r.get("fee") or 0 for r in ls]
+
+    # Photo coverage: listings with at least 1 photo
+    photo_covered = sum(1 for r in ls if (r.get("photo_amt") or 0) > 0)
+
+    # Description quality: listings with > 10 words
+    desc_quality = sum(
+        1 for r in ls
+        if len((r.get("description_improved") or r.get("description") or "").split()) > 10
+    )
+
+    # Long-stay: predicted speed 4 (no adoption)
+    long_stay = sum(1 for r in active if r.get("adoption_speed_pred") == 4)
+
+    # Health distribution
+    health_dist = {}
+    for r in ls:
+        h = r.get("health", 1)
+        health_dist[h] = health_dist.get(h, 0) + 1
+
+    # Vaccination/sterilization/deworming among active
+    vacc_yes = sum(1 for r in active if r.get("vaccinated") == 1)
+    ster_yes = sum(1 for r in active if r.get("sterilized") == 1)
+    dew_yes = sum(1 for r in active if r.get("dewormed") == 1)
+
+    # Age distributions
+    dog_ages = [r.get("age", 0) or 0 for r in dogs]
+    cat_ages = [r.get("age", 0) or 0 for r in cats]
+
+    # Speed bucket distribution (predicted)
+    speed_dist = {}
+    for r in ls:
+        sp = r.get("adoption_speed_pred")
+        if sp is not None:
+            speed_dist[sp] = speed_dist.get(sp, 0) + 1
+
     return {
         "total": total,
-        "active": active,
-        "adopted": adopted,
-        "adoption_rate": (adopted / total * 100) if total else 0,
+        "active": len(active),
+        "adopted": len(adopted),
+        "adoption_rate": (len(adopted) / total * 100) if total else 0,
         "avg_adoption_speed": (sum(speeds) / len(speeds)) if speeds else None,
         "avg_los_days": (sum(los_vals) / len(los_vals)) if los_vals else None,
         "total_views": total_views,
         "total_contacts": total_contacts,
         "contact_rate": (total_contacts / total_views * 100) if total_views else 0,
+        "avg_fee": (sum(avg_fee_vals) / len(avg_fee_vals)) if avg_fee_vals else 0,
+        "photo_coverage_rate": (photo_covered / total * 100) if total else 0,
+        "avg_photo_count": (sum(r.get("photo_amt") or 0 for r in ls) / total) if total else 0,
+        "desc_quality_rate": (desc_quality / total * 100) if total else 0,
+        "long_stay_rate": (long_stay / len(active) * 100) if active else 0,
+        "inquiries_per_active": (total_contacts / len(active)) if active else 0,
+        "dog_count": len(dogs),
+        "cat_count": len(cats),
+        "dog_ages": dog_ages,
+        "cat_ages": cat_ages,
+        "speed_dist": speed_dist,
+        "health_dist": health_dist,
+        "vacc_rate": (vacc_yes / len(active) * 100) if active else 0,
+        "ster_rate": (ster_yes / len(active) * 100) if active else 0,
+        "dew_rate": (dew_yes / len(active) * 100) if active else 0,
         "listings": ls,
+        "active_listings": active,
+        "adopted_listings": adopted,
     }
 
 
@@ -407,47 +620,40 @@ def send_message(sender_id: int, receiver_id: int, content: str,
 
 def get_conversation(user1_id: int, user2_id: int,
                      listing_id: Optional[int] = None) -> List[Dict]:
+    """Return all messages between two users (listing_id ignored — one chat per pair)."""
     conn = get_conn()
-    if listing_id:
-        rows = conn.execute(
-            """SELECT m.*, u.username AS sender_name FROM messages m
-               JOIN users u ON m.sender_id = u.id
-               WHERE m.listing_id = ?
-               AND ((m.sender_id=? AND m.receiver_id=?) OR (m.sender_id=? AND m.receiver_id=?))
-               ORDER BY m.created_at ASC""",
-            (listing_id, user1_id, user2_id, user2_id, user1_id),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT m.*, u.username AS sender_name FROM messages m
-               JOIN users u ON m.sender_id = u.id
-               WHERE (m.sender_id=? AND m.receiver_id=?) OR (m.sender_id=? AND m.receiver_id=?)
-               ORDER BY m.created_at ASC""",
-            (user1_id, user2_id, user2_id, user1_id),
-        ).fetchall()
+    rows = conn.execute(
+        """SELECT m.*, u.username AS sender_name FROM messages m
+           JOIN users u ON m.sender_id = u.id
+           WHERE (m.sender_id=? AND m.receiver_id=?) OR (m.sender_id=? AND m.receiver_id=?)
+           ORDER BY m.created_at ASC""",
+        (user1_id, user2_id, user2_id, user1_id),
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def get_user_conversations(user_id: int) -> List[Dict]:
+    """Return one conversation entry per unique other party (not per listing)."""
     conn = get_conn()
     rows = conn.execute(
-        """SELECT
-               CASE WHEN m.sender_id=? THEN m.receiver_id ELSE m.sender_id END AS other_id,
-               u.username AS other_username,
-               u.shelter_name,
-               m.listing_id,
-               l.pet_name,
-               m.content AS last_message,
-               m.created_at AS last_at,
-               SUM(CASE WHEN m.receiver_id=? AND m.is_read=0 THEN 1 ELSE 0 END) AS unread_count
-           FROM messages m
-           JOIN users u ON u.id = CASE WHEN m.sender_id=? THEN m.receiver_id ELSE m.sender_id END
-           LEFT JOIN listings l ON l.id = m.listing_id
-           WHERE m.sender_id=? OR m.receiver_id=?
-           GROUP BY other_id, m.listing_id
-           ORDER BY last_at DESC""",
-        (user_id, user_id, user_id, user_id, user_id),
+        """WITH pairs AS (
+               SELECT
+                   CASE WHEN m.sender_id=? THEN m.receiver_id ELSE m.sender_id END AS other_id,
+                   MAX(m.id) AS last_msg_id,
+                   SUM(CASE WHEN m.receiver_id=? AND m.is_read=0 THEN 1 ELSE 0 END) AS unread_count
+               FROM messages m
+               WHERE m.sender_id=? OR m.receiver_id=?
+               GROUP BY other_id
+           )
+           SELECT p.other_id, p.unread_count,
+                  u.username AS other_username, u.shelter_name,
+                  m.content AS last_message, m.created_at AS last_at
+           FROM pairs p
+           JOIN users u ON u.id = p.other_id
+           JOIN messages m ON m.id = p.last_msg_id
+           ORDER BY m.created_at DESC""",
+        (user_id, user_id, user_id, user_id),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -455,19 +661,13 @@ def get_user_conversations(user_id: int) -> List[Dict]:
 
 def mark_messages_read(reader_id: int, sender_id: int,
                         listing_id: Optional[int] = None):
+    """Mark all messages from sender to reader as read (listing_id ignored)."""
     conn = get_conn()
-    if listing_id:
-        with conn:
-            conn.execute(
-                "UPDATE messages SET is_read=1 WHERE receiver_id=? AND sender_id=? AND listing_id=?",
-                (reader_id, sender_id, listing_id),
-            )
-    else:
-        with conn:
-            conn.execute(
-                "UPDATE messages SET is_read=1 WHERE receiver_id=? AND sender_id=?",
-                (reader_id, sender_id),
-            )
+    with conn:
+        conn.execute(
+            "UPDATE messages SET is_read=1 WHERE receiver_id=? AND sender_id=?",
+            (reader_id, sender_id),
+        )
     conn.close()
 
 
@@ -536,3 +736,181 @@ def is_seeded() -> bool:
     ).fetchone()
     conn.close()
     return (row["cnt"] > 0) if row else False
+
+
+# ── Adoption Surveys ────────────────────────────────────────────────────────────
+
+def submit_survey(listing_id: int, user_id: int, score: int, comment: str = "") -> bool:
+    conn = get_conn()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO adoption_surveys (listing_id, user_id, satisfaction_score, comment) "
+                "VALUES (?, ?, ?, ?)",
+                (listing_id, user_id, score, comment),
+            )
+        conn.close()
+        return True
+    except Exception:
+        conn.close()
+        return False
+
+
+def get_shelter_avg_satisfaction(shelter_id: int) -> Optional[float]:
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT AVG(s.satisfaction_score) AS avg_score
+           FROM adoption_surveys s
+           JOIN listings l ON s.listing_id = l.id
+           WHERE l.shelter_id = ?""",
+        (shelter_id,),
+    ).fetchone()
+    conn.close()
+    val = row["avg_score"] if row else None
+    return float(val) if val is not None else None
+
+
+# ── Engagement tracking & surveys ──────────────────────────────────────────────
+
+def increment_action_count(user_id: int) -> int:
+    """Increment the user's cumulative action count and return the new value."""
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            "UPDATE users SET action_count = COALESCE(action_count, 0) + 1 WHERE id = ?",
+            (user_id,),
+        )
+    row = conn.execute("SELECT action_count FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row["action_count"] if row else 0
+
+
+def get_completed_survey_thresholds(user_id: int) -> List[int]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT threshold FROM user_surveys WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    conn.close()
+    return [r["threshold"] for r in rows]
+
+
+def save_user_survey(user_id: int, threshold: int, score: Optional[int], comment: str = "") -> bool:
+    conn = get_conn()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO user_surveys (user_id, threshold, score, comment) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, threshold, score, comment),
+            )
+        conn.close()
+        return True
+    except Exception:
+        conn.close()
+        return False
+
+
+# ── Admin / platform-wide queries ─────────────────────────────────────────────
+
+def get_all_users() -> List[Dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, username, email, role, shelter_name, country, city, "
+        "action_count, created_at FROM users ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_all_surveys() -> List[Dict]:
+    """Return all user engagement surveys (user_surveys table)."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT s.*, u.username, u.email
+           FROM user_surveys s JOIN users u ON s.user_id = u.id
+           ORDER BY s.created_at DESC"""
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_platform_stats() -> Dict:
+    conn = get_conn()
+
+    total_users = conn.execute("SELECT COUNT(*) FROM users WHERE role != 'admin'").fetchone()[0]
+    households = conn.execute("SELECT COUNT(*) FROM users WHERE role='household'").fetchone()[0]
+    managers = conn.execute("SELECT COUNT(*) FROM users WHERE role='shelter_manager'").fetchone()[0]
+    total_listings = conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+    active_listings = conn.execute("SELECT COUNT(*) FROM listings WHERE status='available'").fetchone()[0]
+    adopted_listings = conn.execute("SELECT COUNT(*) FROM listings WHERE status='adopted'").fetchone()[0]
+    total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    total_watchlist = conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
+    avg_sat_row = conn.execute(
+        "SELECT AVG(satisfaction_score) FROM adoption_surveys"
+    ).fetchone()
+    avg_sat = float(avg_sat_row[0]) if avg_sat_row[0] else None
+
+    # User registrations per month
+    reg_rows = conn.execute(
+        """SELECT strftime('%Y-%m', created_at) AS month, COUNT(*) AS cnt
+           FROM users WHERE role != 'admin' GROUP BY month ORDER BY month"""
+    ).fetchall()
+
+    # Listings created per month
+    listing_rows = conn.execute(
+        """SELECT strftime('%Y-%m', created_at) AS month, COUNT(*) AS cnt
+           FROM listings GROUP BY month ORDER BY month"""
+    ).fetchall()
+
+    # User survey score distribution
+    survey_rows = conn.execute(
+        "SELECT score, COUNT(*) AS cnt FROM user_surveys WHERE score IS NOT NULL GROUP BY score"
+    ).fetchall()
+
+    conn.close()
+    return {
+        "total_users": total_users,
+        "households": households,
+        "managers": managers,
+        "total_listings": total_listings,
+        "active_listings": active_listings,
+        "adopted_listings": adopted_listings,
+        "adoption_rate": (adopted_listings / total_listings * 100) if total_listings else 0,
+        "total_messages": total_messages,
+        "total_watchlist": total_watchlist,
+        "avg_satisfaction": avg_sat,
+        "registrations_by_month": [dict(r) for r in reg_rows],
+        "listings_by_month": [dict(r) for r in listing_rows],
+        "survey_score_dist": {r[0]: r[1] for r in survey_rows},
+    }
+
+
+def get_recent_events(limit: int = 50) -> List[Dict]:
+    """Return recent platform events (messages, watchlist adds) ordered by time."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT event_type, created_at, actor, target, detail FROM (
+               SELECT 'message' AS event_type,
+                      m.created_at,
+                      su.username AS actor,
+                      ru.username AS target,
+                      SUBSTR(m.content, 1, 80) AS detail
+               FROM messages m
+               JOIN users su ON m.sender_id = su.id
+               JOIN users ru ON m.receiver_id = ru.id
+               UNION ALL
+               SELECT 'watchlist' AS event_type,
+                      w.created_at,
+                      u.username AS actor,
+                      l.pet_name AS target,
+                      'Added to watchlist' AS detail
+               FROM watchlist w
+               JOIN users u ON w.user_id = u.id
+               JOIN listings l ON w.listing_id = l.id
+           )
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

@@ -1,15 +1,15 @@
 """
 Top navbar — Logo + horizontal nav + user avatar / login, all in one row.
-
-Fixes vs v1:
-- option_menu icons removed (the strange play-arrow glyphs)
-- nav-link white-space:nowrap so Shelter nav doesn't wrap into 2 lines
-- guest CTA buttons are compact and don't break across lines
+Logo uses the actual PNG from assets/logo/; falls back to inline SVG.
+Profile avatar is a clickable button that navigates to the profile view.
 """
 import streamlit as st
 from streamlit_option_menu import option_menu
 
-from frontend.styles import COLOR_PRIMARY, COLOR_BG_SOFT, COLOR_BORDER, COLOR_TEXT_MUTED, logo_svg
+from frontend.styles import (
+    COLOR_PRIMARY, COLOR_BG_SOFT, COLOR_BORDER, COLOR_TEXT_MUTED,
+    logo_img_tag,
+)
 from frontend.utils import auth
 
 
@@ -20,21 +20,18 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
     display_name = (user.get("shelter_name") or user["username"]) if user else None
     initial = (display_name[:1].upper() if display_name else "?")
 
-    # Wider nav column for shelter (more options); narrower for guest
     if user and user.get("role") == "shelter_manager":
-        col_widths = [2.2, 5.5, 2.0]
+        col_widths = [2.2, 5.5, 2.2]
     elif user is None:
         col_widths = [2.5, 4.0, 2.0]
     else:
-        col_widths = [2.5, 4.5, 2.0]
+        col_widths = [2.5, 4.5, 2.2]
 
     brand_col, nav_col, user_col = st.columns(col_widths, gap="medium")
 
-    # ── Brand: logo + wordmark + optional role badge ────────────────────────
+    # ── Brand: actual logo image + wordmark + optional role badge ─────────────
     with brand_col:
-        # Render the wordmark + (optional) badge as a vertical stack so the
-        # badge can sit right under the wordmark instead of being clipped at
-        # the right edge of a narrow column.
+        logo_html = logo_img_tag(size=64)
         if role_label and user:
             wordmark_block = (
                 f'<div style="display:flex;flex-direction:column;'
@@ -55,23 +52,15 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
         brand_html = (
             f'<div style="display:flex;align-items:center;gap:12px;'
             f'padding:10px 0 10px 8px;min-height:64px;overflow:visible;">'
-            f'{logo_svg(40)}'
+            f'{logo_html}'
             f'{wordmark_block}'
             f'</div>'
         )
         st.markdown(brand_html, unsafe_allow_html=True)
 
-    # ── Horizontal nav menu ─────────────────────────────────────────────────
+    # ── Horizontal nav menu ───────────────────────────────────────────────────
     with nav_col:
-        # Use empty icons list so option_menu doesn't add the default arrow icons.
-        # Length must match nav_options.
         empty_icons = [""] * len(nav_options)
-        # IMPORTANT: include default_index in the key so option_menu re-initializes
-        # whenever the routed view changes. Without this, option_menu's internal
-        # widget state remembers the previous selection (e.g. "Watchlist") and
-        # returns it on a rerun where we wanted "Browse" — which then trips
-        # the sync block in app.py and bounces the user back to the old view.
-        # Tying the key to default_index forces a fresh widget per view.
         role_part = (role_label or "guest").lower().replace(" ", "_")
         menu_key = f"nav_menu_{role_part}_{default_index}"
         selected = option_menu(
@@ -88,7 +77,7 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
                     "border": "none",
                     "margin": "0",
                 },
-                "icon": {"display": "none"},  # hard-hide any leftover icon space
+                "icon": {"display": "none"},
                 "nav-link": {
                     "font-size": "14px",
                     "font-weight": "400",
@@ -99,7 +88,7 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
                     "background-color": "transparent",
                     "border-bottom": "2px solid transparent",
                     "border-radius": "0",
-                    "white-space": "nowrap",  # prevents 2-line wrapping
+                    "white-space": "nowrap",
                     "--hover-color": "transparent",
                 },
                 "nav-link-selected": {
@@ -111,26 +100,28 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
             },
         )
 
-    # ── Right: avatar + name (logged in) OR login/register (guest) ──────────
+    # ── Right: profile popover OR guest login/register ────────────────────────
     with user_col:
         if user:
-            user_html = (
-                f'<div style="display:flex;align-items:center;justify-content:flex-end;'
-                f'gap:10px;padding:14px 8px 14px 0;height:64px;">'
-                f'<div style="background:{COLOR_PRIMARY};color:#FFFFFF;width:36px;'
-                f'height:36px;border-radius:50%;display:flex;align-items:center;'
-                f'justify-content:center;font-size:14px;font-weight:500;flex-shrink:0;">'
-                f'{initial}</div>'
-                f'<span style="font-size:14px;color:#1F2937;font-weight:500;'
-                f'white-space:nowrap;">{display_name}</span>'
-                f'</div>'
-            )
-            st.markdown(user_html, unsafe_allow_html=True)
-            if st.button("Log out", key="navbar_logout", use_container_width=True):
-                auth.logout()
-                st.rerun()
+            st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+            is_manager = user.get("role") == "shelter_manager"
+            with st.popover(
+                f"{display_name} ▾",
+                use_container_width=True,
+            ):
+                if st.button("👤 Profile", key="nav_pop_profile", use_container_width=True):
+                    st.session_state.mp_view_before_profile = st.session_state.get("mp_view", "browse")
+                    st.session_state.mp_view = "profile"
+                    st.rerun()
+                if is_manager:
+                    if st.button("🔄 Update Index", key="nav_pop_update_index",
+                                 use_container_width=True):
+                        st.session_state["_trigger_backfill"] = True
+                        st.rerun()
+                if st.button("🚪 Log out", key="nav_pop_logout", use_container_width=True):
+                    auth.logout()
+                    st.rerun()
         else:
-            # Compact CTA row — Register on the right (primary), Log In secondary
             st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
             login_col, reg_col = st.columns(2, gap="small")
             with login_col:
@@ -144,7 +135,6 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
                     st.session_state.show_auth = "register"
                     st.rerun()
 
-    # Bottom border under the whole strip
     st.markdown(
         f'<div style="height:1px;background:{COLOR_BORDER};margin:0 0 24px 0;"></div>',
         unsafe_allow_html=True,

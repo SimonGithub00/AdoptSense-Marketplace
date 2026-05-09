@@ -7,6 +7,7 @@ logic stays in frontend/utils/* (Simon's modules, untouched).
 Login flow B: browse + detail open to all; save / message triggers auth.
 """
 import base64
+import re
 import sys
 from pathlib import Path
 
@@ -27,9 +28,10 @@ from frontend.utils import auth, db
 from frontend.utils.matching_platform_ui import (
     render_browse, render_detail, render_my_listings,
     render_create_listing, render_edit_listing, render_kpis,
-    render_watchlist, render_chat,
+    render_watchlist, render_chat, render_profile, render_shelter_map,
 )
-from frontend.utils.seed_data import seed_if_needed, backfill_predictions
+from frontend.utils.admin_ui import render_admin_dashboard
+from frontend.utils.seed_data import seed_if_needed, backfill_predictions, create_admin_if_needed
 
 
 # ── Page config & global CSS ──────────────────────────────────────────────────
@@ -42,26 +44,34 @@ st.set_page_config(
 inject_global_css()
 
 
-# ── Bootstrap (Simon's original) ──────────────────────────────────────────────
+# ── Bootstrap ────────────────────────────────────────────────────────────────
 db.init_db()
 seed_if_needed()
+create_admin_if_needed()
 backfill_predictions()
+
+# ── Update Index trigger (from header dropdown) ───────────────────────────────
+if st.session_state.pop("_trigger_backfill", False):
+    with st.spinner("Updating prediction index…"):
+        backfill_predictions()
+    st.success("Prediction index updated!")
 
 
 # ── Session-state defaults ────────────────────────────────────────────────────
 if "mp_view" not in st.session_state:
     st.session_state.mp_view = "browse"
 
-# After-login redirect: shelter managers land on "My Listings".
-# This fires EXACTLY ONCE per login, on the very next rerun after a
-# successful auth.login() call. The auth_overlay sets the flag right
-# before its post-login rerun; we consume it here and clear it.
+# After-login redirect: role-based landing page.
 if st.session_state.pop("_just_logged_in", False):
     cur_user_check = auth.current_user()
-    if cur_user_check and cur_user_check.get("role") == "shelter_manager":
-        st.session_state.mp_view = "my_listings"
-    else:
-        st.session_state.mp_view = "browse"
+    if cur_user_check:
+        _role = cur_user_check.get("role")
+        if _role == "shelter_manager":
+            st.session_state.mp_view = "my_listings"
+        elif _role == "admin":
+            st.session_state.mp_view = "admin_dashboard"
+        else:
+            st.session_state.mp_view = "browse"
 
 
 # ── Navigation config ─────────────────────────────────────────────────────────
@@ -72,8 +82,10 @@ NAV_TO_VIEW = {
     "My Listings": "my_listings",
     "Create Listing": "create",
     "KPIs": "kpis",
+    "Shelter Map": "shelter_map",
     "About": "about",
     "Tools": "tools",
+    "Dashboard": "admin_dashboard",
 }
 VIEW_TO_NAV = {v: k for k, v in NAV_TO_VIEW.items()}
 
@@ -81,12 +93,18 @@ VIEW_TO_NAV = {v: k for k, v in NAV_TO_VIEW.items()}
 def nav_for_role(user: dict | None) -> tuple[list[str], str | None]:
     if user is None:
         return (["Browse", "About"], None)
+    if user.get("role") == "admin":
+        return (["Dashboard", "Browse", "Tools"], "ADMIN")
+    unread = db.get_unread_count(user["id"])
+    msg_label = f"Messages ({unread})" if unread else "Messages"
     if user.get("role") == "shelter_manager":
         return (
-            ["My Listings", "Create Listing", "KPIs", "Messages", "Browse", "Tools"],
+            ["My Listings", "Create Listing", "KPIs", msg_label, "Browse", "Tools"],
             "SHELTER",
         )
-    return (["Browse", "Watchlist", "Messages", "About"], None)
+    wl_count = len(db.get_watchlist(user["id"]))
+    wl_label = f"Watchlist ({wl_count})" if wl_count else "Watchlist"
+    return (["Browse", wl_label, msg_label, "Shelter Map", "About"], None)
 
 
 # ── Hero image: local file with Unsplash fallback ─────────────────────────────
@@ -267,9 +285,21 @@ user = auth.current_user()
 is_manager = bool(user and user.get("role") == "shelter_manager")
 nav_options, role_badge = nav_for_role(user)
 
-current_nav_label = VIEW_TO_NAV.get(st.session_state.mp_view, nav_options[0])
+# "profile" is not a nav item — keep whichever tab was active before
+_view_for_nav = st.session_state.mp_view
+if _view_for_nav == "profile":
+    _view_for_nav = st.session_state.get("mp_view_before_profile", "browse")
+_base_nav_label = VIEW_TO_NAV.get(_view_for_nav, nav_options[0])
+# Nav options may have count suffixes like "Messages (3)" or "Watchlist (2)"
+# Find the matching option regardless of suffix
+current_nav_label = _base_nav_label
 if current_nav_label not in nav_options:
-    current_nav_label = nav_options[0]
+    for opt in nav_options:
+        if re.sub(r'\s*\(\d+\)\s*$', '', opt) == _base_nav_label:
+            current_nav_label = opt
+            break
+    else:
+        current_nav_label = nav_options[0]
 default_idx = nav_options.index(current_nav_label)
 
 selected = render_navbar(
@@ -292,12 +322,13 @@ selected = render_navbar(
 # was buggy (option_menu can't tell apart "user clicked" from "default
 # returned", and it bounced users out of detail views immediately).
 if selected and selected != current_nav_label:
-    target_view = NAV_TO_VIEW.get(selected, "browse")
+    # Strip count suffix e.g. "Messages (3)" → "Messages"
+    _selected_base = re.sub(r'\s*\(\d+\)\s*$', '', selected)
+    target_view = NAV_TO_VIEW.get(_selected_base, "browse")
     if target_view not in ("detail", "edit"):
         st.session_state.pop("mp_listing_id", None)
     if target_view != "chat":
         st.session_state.pop("mp_chat_with", None)
-        st.session_state.pop("mp_chat_listing", None)
     st.session_state.mp_view = target_view
     st.rerun()
 
@@ -367,14 +398,28 @@ elif view == "chat":
         st.stop()
     render_chat(user)
 
+elif view == "profile":
+    if not auth.require_login("view your profile"):
+        st.stop()
+    render_profile(user)
+
+elif view == "shelter_map":
+    render_shelter_map(user)
+
 elif view == "about":
     render_about()
 
 elif view == "tools":
-    if not is_manager:
+    if not is_manager and not (user and user.get("role") == "admin"):
         st.error("Tools are for shelter managers only.")
     else:
         render_tools()
+
+elif view == "admin_dashboard":
+    if not user or user.get("role") != "admin":
+        st.error("This page is for the admin account only.")
+    else:
+        render_admin_dashboard(user)
 
 else:
     st.session_state.mp_view = "browse"

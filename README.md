@@ -102,20 +102,7 @@ Households are individuals looking to adopt a pet. They can:
 ## Admin Account
 
 There is a single, pre-configured administrator account that cannot be created through the
-registration flow:
-
-| Field | Value |
-|-------|-------|
-| Username | `Admin` |
-| Email | `simon.anthofer00@web.de` |
-| Role | `admin` |
-
-**Password:** Set in `.streamlit/secrets.toml` (git-ignored, never committed):
-
-```toml
-[admin]
-password = "your_secure_password"
-```
+registration flow.
 
 The password is SHA-256 + salt hashed on first launch (same scheme as all other accounts).
 If the configured password changes, the hash is updated automatically on next app start.

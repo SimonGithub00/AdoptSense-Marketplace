@@ -5,9 +5,12 @@ Uses the new google-genai SDK (google.genai) instead of the deprecated
 google-generativeai package.
 
 Studio photo pipeline — user picks per upload:
-  Studio — replaces background with a Gemini-suggested backdrop colour +
-           flat backdrop via rembg + PIL. Best when original background is
-           unflattering (cage, dirty floor, harsh wall).
+  Primary  — FLUX.1-Kontext via Hugging Face Inference API.
+             Sends the original photo + prompt; model edits it in-context,
+             preserving fur detail, pose, and anatomy while replacing the
+             background with a professional studio backdrop + soft shadow.
+  Fallback — rembg cutout composited onto a flat neutral backdrop.
+             Used when HF_TOKEN is missing or the HF quota is exhausted.
 
 Smart matching uses deterministic scoring — Gemini only parses the
 natural-language query into structured JSON; all scoring is computed
@@ -56,6 +59,32 @@ def set_api_key(key: str):
 
 def is_configured() -> bool:
     return bool(_get_api_key())
+
+
+# ── Hugging Face token ────────────────────────────────────────────────────────
+
+_HF_TOKEN: Optional[str] = None
+
+
+def _get_hf_token() -> Optional[str]:
+    global _HF_TOKEN
+    if _HF_TOKEN:
+        return _HF_TOKEN
+    try:
+        token = st.secrets.get("HF_TOKEN", "")
+        if token:
+            _HF_TOKEN = token
+            return token
+    except Exception:
+        pass
+    token = os.environ.get("HF_TOKEN", "")
+    if token:
+        _HF_TOKEN = token
+    return _HF_TOKEN or None
+
+
+def is_hf_configured() -> bool:
+    return bool(_get_hf_token())
 
 
 def _get_client():
@@ -257,62 +286,119 @@ def improve_description(
         return False, f"Gemini error: {exc}"
 
 
-_STUDIO_PROMPT = (
-    "You are a professional pet portrait editor and studio photographer. "
-    "Look at this pet photo and transform it into a clean professional studio portrait. "
-    "Replace the original environment with a single solid studio backdrop colour that best complements the pet's fur/coat "
-    "and makes the animal stand out beautifully. "
-    "Avoid colours that clash with the pet or are too similar to the pet's main colour. "
-    "Prefer soft, muted, photogenic tones such as dusty blue, muted sage, soft taupe, warm grey, or pale mauve, depending on the coat. "
-    "Do not simply cut out the pet and paste it onto a new background. "
-    "Remove all foreground and background distractions, including grass, leaves, shadows, objects, or anything that overlaps, hides, or visually competes with the animal. "
-    "If grass or other obstacles cover parts of the pet, intelligently reconstruct the hidden areas with realistic inpainting, preserving natural anatomy, fur texture, paws, ears, face, whiskers, body shape, and pose. "
-    "Create a seamless solid studio backdrop and matching floor surface if the pet is sitting or lying down. "
-    "Keep soft professional lighting, realistic fur edges, natural colour balance, and subtle contact shadows under the pet so it does not look pasted on. "
-    "Preserve the pet's original pose, expression, proportions, and approximate framing. "
-    "Do not add accessories, collars, props, text, patterns, scenery, gradients, or extra animals. "
-    "Return only the edited image. No explanation, no text, no JSON."
+# ── FLUX.1-Kontext studio pipeline (primary) ─────────────────────────────────
+
+_FLUX_STUDIO_PROMPT = (
+    "This is a photo editing task. Do NOT change the animal in any way. "
+    "The dog or cat in the result must be pixel-identical in breed, fur color, fur texture, "
+    "face, ears, body shape, pose, and expression to the animal in the input photo. "
+    "Only change the background: replace it with a clean seamless light grey studio backdrop. "
+    "Add soft diffused studio lighting. "
+    "Add a subtle realistic contact shadow directly beneath the animal so it looks grounded. "
+    "Do not alter the animal's fur, color, markings, collar, leash, or body in any way. "
+    "Do not repose, resize, or reframe the animal. "
+    "Do not add or remove any accessories. "
+    "The result must look like the exact same animal photographed in a professional studio."
+)
+
+_FLUX_MODEL = "black-forest-labs/FLUX.1-Kontext-dev"
+
+_FLUX_NEGATIVE_PROMPT = (
+    "different dog, different cat, different animal, different breed, "
+    "different fur color, different fur texture, different face, different ears, "
+    "different body shape, different pose, sitting when original is standing, "
+    "standing when original is sitting, new animal, replaced animal, "
+    "cartoon, illustration, painting, drawing, render, 3d, anime, "
+    "blurry, low quality, watermark, text, logo, "
+    "multiple animals, extra animals, background animal, "
+    "outdoor scene, nature, grass, trees, park, street, "
+    "colorful background, patterned background, gradient background"
 )
 
 
-def _make_studio_with_gemini(image_bytes: bytes) -> tuple[bool, bytes | str]:
-    """Use Gemini image-generation to transform a pet photo into a studio portrait."""
-    key = _get_api_key()
-    if not key:
-        return False, "No API key"
+def _add_studio_shadow(img):
+    """Add a soft elliptical contact shadow + subtle floor reflection beneath the pet.
+
+    Works on any RGB PIL Image returned by FLUX. The shadow is composited
+    onto the image using a Gaussian-blurred ellipse mask so it feathers
+    naturally into the studio backdrop — no hard edges.
+    """
+    from PIL import Image, ImageDraw, ImageFilter
+
+    w, h = img.size
+
+    # ── Contact shadow ────────────────────────────────────────────────────────
+    # Ellipse sits in the bottom ~8% of the image, horizontally centred,
+    # width ~55% of image width. These proportions work well for standing pets.
+    shadow_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(shadow_layer)
+
+    sx = int(w * 0.225)          # left edge of ellipse
+    ex = int(w * 0.775)          # right edge
+    sy = int(h * 0.895)          # top of ellipse
+    ey = int(h * 0.940)          # bottom of ellipse
+    draw.ellipse([sx, sy, ex, ey], fill=(30, 30, 35, 120))
+
+    # Blur heavily so the shadow feathers out softly
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=int(h * 0.018)))
+
+    # Composite shadow beneath the image
+    base = img.convert("RGBA")
+    base = Image.alpha_composite(base, shadow_layer)
+
+    # ── Floor reflection ──────────────────────────────────────────────────────
+    # Thin horizontal gradient strip just above the shadow centre —
+    # mimics the faint bright-floor specular seen in studio shots.
+    refl_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw2 = ImageDraw.Draw(refl_layer)
+    ry = int(h * 0.880)
+    ry2 = int(h * 0.900)
+    draw2.ellipse([sx + int(w*0.06), ry, ex - int(w*0.06), ry2],
+                  fill=(255, 255, 255, 28))
+    refl_layer = refl_layer.filter(ImageFilter.GaussianBlur(radius=int(h * 0.012)))
+    base = Image.alpha_composite(base, refl_layer)
+
+    return base.convert("RGB")
+
+
+def _make_studio_with_flux(image_bytes: bytes) -> tuple[bool, bytes | str]:
+    """Use FLUX.1-Kontext via Hugging Face Inference API to create a studio portrait.
+
+    Uses a detailed positive prompt + negative prompt to minimise hallucination.
+    Post-processes with contact shadow + floor reflection.
+    """
+    token = _get_hf_token()
+    if not token:
+        return False, "HF_TOKEN not configured"
     try:
-        from google import genai
-        from google.genai import types
+        from huggingface_hub import InferenceClient
+        from PIL import Image
 
-        client = genai.Client(api_key=key)
-        # Determine mime type (try to detect PNG vs JPEG)
-        mime = "image/png" if image_bytes[:4] == b'\x89PNG' else "image/jpeg"
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                _STUDIO_PROMPT,
-            ],
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"],
-            ),
+        client = InferenceClient(api_key=token)
+        input_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        result_img = client.image_to_image(
+            image=input_img,
+            prompt=_FLUX_STUDIO_PROMPT,
+            negative_prompt=_FLUX_NEGATIVE_PROMPT,
+            model=_FLUX_MODEL,
         )
-        for candidate in response.candidates:
-            for part in candidate.content.parts:
-                if part.inline_data is not None:
-                    raw = part.inline_data.data
-                    # SDK may return bytes directly or base64 string
-                    if isinstance(raw, (bytes, bytearray)):
-                        return True, bytes(raw)
-                    # base64 string fallback
-                    return True, base64.b64decode(raw)
-        return False, "Gemini returned no image data"
+
+        result_img = _add_studio_shadow(result_img)
+
+        out = io.BytesIO()
+        result_img.save(out, "PNG")
+        _log("Studio via FLUX.1-Kontext (HF) succeeded")
+        return True, out.getvalue()
+
     except Exception as exc:
-        _log(f"_make_studio_with_gemini error: {exc}")
-        return False, str(exc)
+        err = str(exc)
+        if "402" in err or "exceeded" in err.lower() or "credits" in err.lower():
+            _log(f"HF quota exhausted: {exc}")
+            return False, "hf_quota_exceeded"
+        _log(f"_make_studio_with_flux error: {exc}")
+        return False, err
 
-
-# ── Cutout fallback (rembg) ───────────────────────────────────────────────────
 
 def _do_cutout(image_bytes: bytes):
     """rembg background removal — fallback when Gemini image editing is unavailable."""
@@ -355,15 +441,17 @@ def make_studio_ready(
 def make_studio_ready_bytes(image_bytes: bytes) -> tuple[bool, bytes | str]:
     """Transform pet photo into studio portrait.
 
-    Tries Gemini image editing first (best quality); falls back to
-    rembg + flat colour backdrop if Gemini is unavailable or fails.
+    Priority order:
+    1. FLUX.1-Kontext via Hugging Face — best quality, preserves fur detail,
+       edits the image in-context without cutout artefacts.
+    2. rembg + flat colour backdrop — fallback when HF_TOKEN is missing or
+       the HF monthly credit quota is exhausted.
     """
-    if is_configured():
-        ok, result = _make_studio_with_gemini(image_bytes)
+    if is_hf_configured():
+        ok, result = _make_studio_with_flux(image_bytes)
         if ok:
-            _log("Studio via Gemini succeeded")
             return True, result
-        _log(f"Gemini studio failed ({result}), falling back to rembg")
+        _log(f"FLUX studio failed ({result}), falling back to rembg")
 
     # rembg fallback: remove background and place on neutral backdrop
     try:

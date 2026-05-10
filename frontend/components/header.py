@@ -21,7 +21,9 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
     initial = (display_name[:1].upper() if display_name else "?")
 
     if user and user.get("role") == "shelter_manager":
-        col_widths = [2.2, 5.5, 2.2]
+        col_widths = [2.4, 5.4, 2.2]
+    elif user and user.get("role") == "admin":
+        col_widths = [2.4, 5.4, 2.2]
     elif user is None:
         col_widths = [2.5, 4.0, 2.0]
     else:
@@ -29,31 +31,34 @@ def render_navbar(nav_options: list[str], default_index: int = 0,
 
     brand_col, nav_col, user_col = st.columns(col_widths, gap="medium")
 
-    # ── Brand: actual logo image + wordmark + optional role badge ─────────────
+    # ── Brand: logo only (PNG already contains wordmark) ─────────────────────
     with brand_col:
-        logo_html = logo_img_tag(size=64)
-        if role_label and user:
-            wordmark_block = (
-                f'<div style="display:flex;flex-direction:column;'
-                f'justify-content:center;line-height:1;">'
-                f'<span style="font-size:24px;font-weight:600;color:{COLOR_PRIMARY};'
-                f'letter-spacing:-0.4px;white-space:nowrap;">AdoptSense</span>'
-                f'<span style="font-size:10px;background:{COLOR_BG_SOFT};'
-                f'color:{COLOR_PRIMARY};padding:2px 8px;border-radius:3px;'
-                f'font-weight:600;letter-spacing:0.6px;margin-top:6px;'
-                f'align-self:flex-start;">{role_label}</span>'
-                f'</div>'
+        # Override the display:block from logo_img_tag by wrapping in flex container
+        b64 = __import__('frontend.styles', fromlist=['logo_png_b64']).logo_png_b64()
+        if b64:
+            logo_html = (
+                f'<img src="data:image/png;base64,{b64}" '
+                f'height="160" '
+                f'style="object-fit:contain;display:inline-block;flex-shrink:0;" '
+                f'alt="AdoptSense logo"/>'
             )
         else:
-            wordmark_block = (
-                f'<span style="font-size:24px;font-weight:600;color:{COLOR_PRIMARY};'
-                f'letter-spacing:-0.4px;line-height:1;white-space:nowrap;">AdoptSense</span>'
+            logo_html = logo_img_tag(size=48)
+
+        if role_label and user:
+            badge_block = (
+                f'<span style="font-size:9px;background:{COLOR_BG_SOFT};'
+                f'color:{COLOR_PRIMARY};padding:2px 7px;border-radius:3px;'
+                f'font-weight:700;letter-spacing:0.6px;white-space:nowrap;'
+                f'border:1px solid {COLOR_PRIMARY}20;">{role_label}</span>'
             )
+        else:
+            badge_block = ""
         brand_html = (
-            f'<div style="display:flex;align-items:center;gap:12px;'
-            f'padding:10px 0 10px 8px;min-height:64px;overflow:visible;">'
+            f'<div style="display:flex;flex-direction:row;align-items:center;'
+            f'gap:0px;padding:0 0 0 0;margin-top:-44px;margin-left:-50px;">'
             f'{logo_html}'
-            f'{wordmark_block}'
+            f'{badge_block}'
             f'</div>'
         )
         st.markdown(brand_html, unsafe_allow_html=True)

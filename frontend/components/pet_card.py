@@ -46,12 +46,7 @@ def _photo_bytes(listing_id: int) -> bytes | None:
 
 def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "pc",
                     compatibility_pct: float | None = None):
-    """Render a single pet card with a working 'View details' button.
-
-    Layout uses st.container(border=True) for the outer card and st.image
-    for the photo. We avoid putting an absolute-positioned HTML block
-    above the button — that was causing clicks to be swallowed.
-    """
+    """Render a single pet card with a working 'View details' button."""
     listing_id = listing["id"]
     pet_name = listing.get("pet_name", "—")
     pet_type = listing.get("type", 1)
@@ -70,8 +65,6 @@ def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "
         if photo_bytes:
             st.image(photo_bytes, use_container_width=True)
         else:
-            # Placeholder tile via a small markdown block. Self-contained,
-            # no overlap with the button below.
             gradient = PLACEHOLDER_GRADIENTS[listing_id % len(PLACEHOLDER_GRADIENTS)]
             emoji = "🐶" if pet_type == 1 else "🐱"
             st.markdown(
@@ -81,7 +74,7 @@ def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "
                 unsafe_allow_html=True,
             )
 
-        # ── Speed badge for shelter managers ───────────────────────────────
+        # ── Speed + confidence badge for shelter managers ───────────────────
         if speed is not None:
             color = ADOPTION_SPEED_COLORS.get(speed, "#999")
             label = ADOPTION_SPEED_LABELS.get(speed, "?")
@@ -108,7 +101,7 @@ def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "
                 unsafe_allow_html=True,
             )
 
-        # ── Pet name + fee (top row) ───────────────────────────────────────
+        # ── Pet name + fee ─────────────────────────────────────────────────
         name_html = (
             f'<div style="display:flex;justify-content:space-between;'
             f'align-items:baseline;margin:8px 0 4px;">'
@@ -134,7 +127,7 @@ def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "
             )
             st.markdown(shelter_html, unsafe_allow_html=True)
 
-        # ── View details button — receives clicks reliably ─────────────────
+        # ── View details button ────────────────────────────────────────────
         if st.button("View details", key=f"{key_prefix}_view_{listing_id}",
                      use_container_width=True, type="secondary"):
             st.session_state.mp_view = "detail"

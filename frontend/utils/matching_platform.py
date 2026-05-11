@@ -8,7 +8,7 @@ ADOPTION_SPEED_LABELS = {
     1: "1–7 days",
     2: "8–30 days",
     3: "31–90 days",
-    4: "No adoption",
+    4: "Needs extra attention",
 }
 
 ADOPTION_SPEED_EMOJI = {

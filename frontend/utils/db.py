@@ -428,6 +428,15 @@ def mark_adopted(listing_id: int, actual_speed: int) -> bool:
 # ── Photos ─────────────────────────────────────────────────────────────────────
 
 def add_photo(listing_id: int, photo_path: str) -> int:
+    p = Path(photo_path)
+    root = Path(__file__).parent.parent.parent 
+    
+    if p.is_absolute():
+        try:
+            photo_path = str(p.relative_to(root).as_posix())
+        except ValueError:
+            photo_path = str(p.as_posix())
+
     conn = get_conn()
     with conn:
         cur = conn.execute(
@@ -473,6 +482,14 @@ def get_videos(listing_id: int) -> List[Dict]:
 
 
 def update_photo_studio(photo_id: int, studio_path: str) -> bool:
+    p = Path(studio_path)
+    root = Path(__file__).parent.parent.parent
+    if p.is_absolute():
+        try:
+            studio_path = str(p.relative_to(root).as_posix())
+        except ValueError:
+            studio_path = str(p.as_posix())
+
     conn = get_conn()
     with conn:
         conn.execute(

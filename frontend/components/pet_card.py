@@ -74,6 +74,27 @@ def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "
                 unsafe_allow_html=True,
             )
 
+        # ── AI enhancement badge (opal/glass style) ──────────────────────────
+        photos_data = db.get_photos(listing_id)
+        has_studio = any(p.get("is_studio_ready") for p in photos_data)
+        has_ai_desc = bool(listing.get("description_improved"))
+        if has_studio or has_ai_desc:
+            badges = []
+            if has_studio:
+                badges.append("✨ Photo enhanced")
+            if has_ai_desc:
+                badges.append("✨ Description enhanced")
+            badge_text = " · ".join(badges)
+            st.markdown(
+                f'<div style="display:inline-block;background:rgba(255,255,255,0.82);'
+                f'backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);'
+                f'border:1px solid rgba(30,39,97,0.18);border-radius:4px;'
+                f'padding:2px 7px;font-size:10px;color:#1E2761;font-weight:500;'
+                f'letter-spacing:0.2px;margin-bottom:4px;">'
+                f'{badge_text}</div>',
+                unsafe_allow_html=True,
+            )
+
         # ── Speed + confidence badge for shelter managers ───────────────────
         if speed is not None:
             color = ADOPTION_SPEED_COLORS.get(speed, "#999")

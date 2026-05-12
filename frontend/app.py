@@ -232,27 +232,70 @@ def render_about():
     st.markdown(f"""
     <p style='color:{COLOR_TEXT_BODY};font-size:15px;line-height:1.6;'>
     AdoptSense connects rescue animals with loving homes using AI. Backed by
-    15,000+ adoption outcomes, our XGBoost model predicts adoption speed and our
-    Gemini-powered Listing Agent helps shelters create studio-quality photos and
-    adoption-optimised descriptions.
+    15,000+ adoption outcomes, our XGBoost model predicts adoption speed and translates
+    those predictions into actionable listing recommendations for shelter managers.
+    The Gemini-powered Listing Agent helps shelters create studio-quality photos and
+    adoption-optimised descriptions — all AI enhancements are clearly labelled.
     </p>
     """, unsafe_allow_html=True)
     st.markdown("---")
-    st.markdown("""
-    **Tech stack**
 
-    | Component | Technology |
-    |-----------|------------|
-    | ML model | XGBoost (5-class adoption speed prediction) |
-    | Sentiment | NLTK VADER |
-    | Listing Agent | Google Gemini 2.5 Flash |
-    | Photo enhancement | rembg + PIL studio backdrop |
-    | Frontend | Streamlit + streamlit-option-menu |
-    | Database | SQLite |
-    | Auth | SHA-256 + salt |
+    tab_tech, tab_ethics = st.tabs(["🛠️ Tech Stack", "⚖️ Ethics & Disclaimer"])
 
-    **Dataset:** Petfinder.my Kaggle Competition · 14,993 labelled listings
-    """)
+    with tab_tech:
+        st.markdown("""
+**Tech stack**
+
+| Component | Technology |
+|-----------|------------|
+| ML model | XGBoost (5-class adoption speed prediction) |
+| Sentiment | NLTK VADER |
+| Listing Agent | Google Gemini 2.5 Flash |
+| Photo Studio | FLUX.1-Kontext (Black Forest Labs) via Hugging Face · fallback: rembg + PIL |
+| Voice memo | Gemini 2.5 Flash (speech-to-text) |
+| Text-to-speech | Gemini 2.5 Flash Preview TTS |
+| Frontend | Streamlit + streamlit-option-menu |
+| Database | SQLite |
+| Auth | SHA-256 + random salt |
+
+**Dataset:** PetFinder.my Kaggle Competition · 14,993 labelled listings (Malaysia, 2018)
+
+**Model performance:** Accuracy 39.9% · Macro F1 0.346 · Weighted F1 0.388 (5-class task; random baseline: 20%)
+
+**Top predictors:** photo presence (0.129), sterilization status (0.050), age (0.042)
+        """)
+
+    with tab_ethics:
+        st.markdown(f"""
+<div style="background:#FFF8E7;border:1px solid #F0D080;border-radius:10px;padding:16px;margin-bottom:16px;">
+<strong>⚠️ Prototype Disclaimer</strong><br>
+AdoptSense is an academic research prototype built for a Nova SBE Machine Learning course project.
+It is not intended for production deployment without independent bias auditing, GDPR compliance
+review, and shelter manager training on interpreting AI outputs as decision support — not ground truth.
+</div>
+""", unsafe_allow_html=True)
+
+        st.markdown("""
+**Model limitations**
+
+- **Geographic bias:** Trained exclusively on Malaysian shelter data. Predictions for European or other shelters should be interpreted with extra caution — feature distributions (breeds, fees, state codes) may not generalise.
+- **Accuracy ceiling:** At ~40% accuracy on a 5-class task, the model is a useful signal, not a deterministic predictor. Confidence scores are always shown alongside predictions.
+- **Proxy features:** Photo presence is the strongest predictor, which may disadvantage shelters with fewer photography resources — a systemic inequity the Photo Studio feature aims to address.
+- **Label framing:** Speed classes are shown as actionable recommendations ("Top listing", "High priority"), not time promises, to avoid stigmatising hard-to-place animals or creating false expectations.
+
+**AI transparency**
+
+- ✨ **Photos** processed with the Photo Studio (FLUX.1-Kontext or rembg) are labelled with a badge on listing cards. The original photo is always accessible in the gallery.
+- ✨ **Descriptions** rewritten by Gemini are flagged on the listing card. The original description is always accessible via "Show original description".
+- **Smart Filter** compatibility scores are AI-assisted rankings, not guarantees of pet-adopter fit.
+- **No autonomous decisions:** All AI outputs are recommendations to human shelter managers. No listing is automatically accepted, rejected, or modified without explicit shelter action.
+
+**Data privacy**
+
+- All data is stored locally in SQLite. Data is only sent to Gemini (descriptions, photos, audio) and Hugging Face (photos for Photo Studio) — no user account data is ever shared with third parties.
+- Passwords are SHA-256 + salt hashed; plaintext passwords are never stored or transmitted.
+- The database and all secrets are excluded from version control.
+        """)
 
 
 def render_tools():

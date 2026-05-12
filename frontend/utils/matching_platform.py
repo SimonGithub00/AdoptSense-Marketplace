@@ -4,11 +4,11 @@ Data persistence is handled by db.py; this module holds shared mappings.
 """
 
 ADOPTION_SPEED_LABELS = {
-    0: "Same day",
-    1: "1–7 days",
-    2: "8–30 days",
-    3: "31–90 days",
-    4: "Needs extra attention",
+    0: "Top listing — strong demand expected",
+    1: "Good listing — good adoption outlook",
+    2: "Optimize listing — moderate demand",
+    3: "Needs attention — improve photos & description",
+    4: "High priority — consider fee reduction or rewrite",
 }
 
 ADOPTION_SPEED_EMOJI = {

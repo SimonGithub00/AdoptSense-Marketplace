@@ -78,7 +78,6 @@ def _fix_fk_references(conn):
         return
 
     conn.execute("PRAGMA foreign_keys = OFF")
-    conn.execute("PRAGMA legacy_alter_table = ON")  # prevent auto-FK-update in child tables
     conn.execute("BEGIN")
     try:
         conn.execute("ALTER TABLE listings RENAME TO _listings_fk_old")
@@ -159,65 +158,6 @@ def _fix_fk_references(conn):
         conn.execute("ROLLBACK")
         raise
     finally:
-        conn.execute("PRAGMA legacy_alter_table = OFF")
-        conn.execute("PRAGMA foreign_keys = ON")
-
-
-def _fix_child_table_fks(conn):
-    """Repair listing_kpis / listing_photos / listing_videos if they reference the
-    temporary _listings_fk_old table left by a prior migration run."""
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing_kpis'"
-    ).fetchone()
-    if not row or '_listings_fk_old' not in (row[0] or ''):
-        return
-
-    conn.execute("PRAGMA foreign_keys = OFF")
-    conn.execute("PRAGMA legacy_alter_table = ON")
-    conn.execute("BEGIN")
-    try:
-        conn.execute("ALTER TABLE listing_kpis RENAME TO _listing_kpis_fix")
-        conn.execute("""CREATE TABLE listing_kpis (
-            listing_id INTEGER PRIMARY KEY,
-            views INTEGER DEFAULT 0,
-            contacts INTEGER DEFAULT 0,
-            adoption_time_days INTEGER,
-            last_view_at DATETIME,
-            FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE
-        )""")
-        conn.execute("INSERT INTO listing_kpis SELECT * FROM _listing_kpis_fix")
-        conn.execute("DROP TABLE _listing_kpis_fix")
-
-        conn.execute("ALTER TABLE listing_photos RENAME TO _listing_photos_fix")
-        conn.execute("""CREATE TABLE listing_photos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            listing_id INTEGER NOT NULL,
-            photo_path TEXT NOT NULL,
-            is_studio_ready INTEGER DEFAULT 0,
-            studio_photo_path TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE
-        )""")
-        conn.execute("INSERT INTO listing_photos SELECT * FROM _listing_photos_fix")
-        conn.execute("DROP TABLE _listing_photos_fix")
-
-        conn.execute("ALTER TABLE listing_videos RENAME TO _listing_videos_fix")
-        conn.execute("""CREATE TABLE listing_videos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            listing_id INTEGER NOT NULL,
-            video_path TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE
-        )""")
-        conn.execute("INSERT INTO listing_videos SELECT * FROM _listing_videos_fix")
-        conn.execute("DROP TABLE _listing_videos_fix")
-
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.execute("PRAGMA legacy_alter_table = OFF")
         conn.execute("PRAGMA foreign_keys = ON")
 
 
@@ -227,7 +167,6 @@ def init_db():
     # Must run before the executescript (which does an implicit COMMIT)
     _ensure_admin_role_supported(conn)
     _fix_fk_references(conn)
-    _fix_child_table_fks(conn)
     with conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (

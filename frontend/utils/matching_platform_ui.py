@@ -101,7 +101,7 @@ def _show_gallery(photos: list[dict], max_cols: int = 3):
     for i, p in enumerate(valid):
         data = _img_bytes(p["photo_path"])
         with cols[i % max_cols]:
-            st.image(data, use_container_width=True)
+            st.image(data, width='stretch')
             if p.get("is_studio_ready") and p.get("studio_photo_path"):
                 s_bytes = _img_bytes(p["studio_photo_path"])
                 if s_bytes:
@@ -895,11 +895,11 @@ def _render_studio_for_files(all_files: list, prefix: str):
         cols = st.columns(2)
         with cols[0]:
             st.caption("📷 Original")
-            st.image(upload_bytes, use_container_width=True)
+            st.image(upload_bytes, width='stretch')
         with cols[1]:
             st.caption("🎨 Studio")
             if studio_bytes:
-                st.image(studio_bytes, use_container_width=True)
+                st.image(studio_bytes, width='stretch')
             else:
                 st.markdown(
                     "<div style='background:#F3F4F6;border-radius:8px;height:160px;"
@@ -1477,10 +1477,10 @@ def render_edit_listing(listing_id: int, user: dict):
                         eb1, eb2 = st.columns(2)
                         with eb1:
                             st.caption("📷 Original")
-                            st.image(img_b, use_container_width=True)
+                            st.image(img_b, width='stretch')
                         with eb2:
                             st.caption("✨ Studio")
-                            st.image(ed_pending, use_container_width=True)
+                            st.image(ed_pending, width='stretch')
                         st.radio("Keep which?", ["studio", "original"],
                                  format_func=lambda x: "✨ Studio" if x == "studio" else "📷 Original",
                                  key=ed_choice_key, horizontal=True, index=0)

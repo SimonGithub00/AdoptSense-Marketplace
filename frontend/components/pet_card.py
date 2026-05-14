@@ -63,7 +63,7 @@ def render_pet_card(listing: dict, show_speed: bool = False, key_prefix: str = "
         # ── Photo (or placeholder) ──────────────────────────────────────────
         photo_bytes = _photo_bytes(listing_id)
         if photo_bytes:
-            st.image(photo_bytes, use_container_width=True)
+            st.image(photo_bytes, width='stretch')
         else:
             gradient = PLACEHOLDER_GRADIENTS[listing_id % len(PLACEHOLDER_GRADIENTS)]
             emoji = "🐶" if pet_type == 1 else "🐱"
